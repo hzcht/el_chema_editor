@@ -1,0 +1,17 @@
+# Binaries
+*.exe
+*.exe~
+/dist/
+/spike/*/bin/
+
+# Go build/test artifacts
+*.out
+coverage.*
+vendor/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

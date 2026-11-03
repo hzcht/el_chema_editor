@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<title>Spike Wails</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; }
+  canvas { display: block; cursor: default; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script>
+"use strict";
+// --- Маска спайка: мир, камера, блоки, коннектор ---------------------------
+const WORLD_W = 2000, WORLD_H = 1500, GRID = 32, BW = 120, BH = 64;
+const blocks = [
+  { name: "A", x: 100, y: 100 },
+  { name: "B", x: 420, y: 280 },
+  { name: "C", x: 200, y: 520 },
+];
+const conn = { from: 0, to: 1 };
+
+let cam = { zoom: 1, panX: 0, panY: 0 };
+function w2s(x, y) { return [x * cam.zoom + cam.panX, y * cam.zoom + cam.panY]; }
+function s2w(x, y) { return [(x - cam.panX) / cam.zoom, (y - cam.panY) / cam.zoom]; }
+function zoomAt(sx, sy, f) {
+  const [wx, wy] = s2w(sx, sy);
+  const z = Math.min(8, Math.max(0.1, cam.zoom * f));
+  cam.zoom = z;
+  cam.panX = sx - wx * z;
+  cam.panY = sy - wy * z;
+}
+function snap(v, step) { return Math.round(v / step) * step; }
+
+// --- Canvas ---------------------------------------------------------------
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+let dpr = window.devicePixelRatio || 1;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  cv.width  = Math.floor(innerWidth * dpr);
+  cv.height = Math.floor(innerHeight * dpr);
+  cv.style.width = innerWidth + "px";
+  cv.style.height = innerHeight + "px";
+  draw();
+}
+window.addEventListener("resize", resize);
+
+// --- Ввод -----------------------------------------------------------------
+let dragBlock = -1, dragOff = [0, 0], panning = false, dragPanned = false;
+let mouseDown = false;
+
+function hitBlock(sx, sy) {
+  const [wx, wy] = s2w(sx, sy);
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (wx >= b.x && wx <= b.x + BW && wy >= b.y && wy <= b.y + BH) return i;
+  }
+  return -1;
+}
+
+cv.addEventListener("mousedown", (ev) => {
+  const x = ev.offsetX, y = ev.offsetY;
+  if (ev.button !== 0) return;
+  mouseDown = true; dragPanned = false;
+  const i = hitBlock(x, y);
+  if (i >= 0) {
+    const [wx, wy] = s2w(x, y);
+    dragBlock = i;
+    dragOff = [wx - blocks[i].x, wy - blocks[i].y];
+  } else {
+    panning = true;
+  }
+  draw();
+});
+
+window.addEventListener("mousemove", (ev) => {
+  if (!mouseDown) return;
+  const r = cv.getBoundingClientRect();
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  const lastMx = (window._mx ?? x), lastMy = (window._my ?? y);
+  window._mx = x; window._my = y;
+  if (dragBlock >= 0) {
+    const [wx, wy] = s2w(x, y);
+    blocks[dragBlock].x = wx - dragOff[0];
+    blocks[dragBlock].y = wy - dragOff[1];
+    draw();
+  } else if (panning) {
+    // pan: сдвигаем камеру на dx от предыдущей позиции мыши
+    cam.panX += x - lastMx;
+    cam.panY += y - lastMy;
+    dragPanned = true;
+    draw();
+  }
+});
+
+window.addEventListener("mouseup", () => {
+  if (!mouseDown) return;
+  mouseDown = false;
+  _mx = _my = undefined;
+  if (dragBlock >= 0) {
+    blocks[dragBlock].x = snap(blocks[dragBlock].x, GRID);
+    blocks[dragBlock].y = snap(blocks[dragBlock].y, GRID);
+    dragBlock = -1;
+  }
+  panning = false;
+  draw();
+});
+
+cv.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const r = cv.getBoundingClientRect();
+  const f = Math.pow(1.1, -Math.sign(ev.deltaY) * (Math.abs(ev.deltaY) > 40 ? 1 : 0.7));
+  zoomAt(ev.clientX - r.left, ev.clientY - r.top, f);
+  draw();
+}, { passive: false });
+
+// --- Отрисовка -------------------------------------------------------------
+function draw() {
+  const W = innerWidth, H = innerHeight;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#f7f7f8";
+  ctx.fillRect(0, 0, W, H);
+
+  // сетка — только видимая часть мира
+  const [wx0, wy0] = s2w(0, 0), [wx1, wy1] = s2w(W, H);
+  ctx.strokeStyle = "#d9dcdf"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = Math.max(0, Math.ceil(wx0 / GRID) * GRID); x <= Math.min(wx1, WORLD_W); x += GRID) {
+    const [sx0, sy0] = w2s(x, Math.max(0, wy0)), [sx1, sy1] = w2s(x, Math.min(wy1, WORLD_H));
+    ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1);
+  }
+  for (let y = Math.max(0, Math.ceil(wy0 / GRID) * GRID); y <= Math.min(wy1, WORLD_H); y += GRID) {
+    const [sx0, sy0] = w2s(Math.max(0, wx0), y), [sx1, sy1] = w2s(Math.min(wx1, WORLD_W), y);
+    ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1);
+  }
+  ctx.stroke();
+
+  // коннектор A → B (колено по x-середине)
+  const a = blocks[conn.from], b = blocks[conn.to];
+  const [fx, fy] = w2s(a.x + BW, a.y + BH / 2);
+  const [tx, ty] = w2s(b.x, b.y + BH / 2);
+  const mx = (fx + tx) / 2;
+  ctx.strokeStyle = "#3a5a9a"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(fx, fy); ctx.lineTo(mx, fy); ctx.lineTo(mx, ty); ctx.lineTo(tx, ty);
+  ctx.stroke();
+
+  // блоки
+  for (const blk of blocks) {
+    const [sx, sy] = w2s(blk.x, blk.y);
+    const sw = BW * cam.zoom, sh = BH * cam.zoom;
+    ctx.fillStyle = "#4274e0"; ctx.fillRect(sx, sy, sw, sh);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `${Math.max(6, 12 * cam.zoom)}px system-ui`;
+    ctx.fillText(blk.name, sx + 10, sy + 6 + Math.max(6, 12 * cam.zoom));
+  }
+
+  // HUD
+  ctx.fillStyle = "#55606a";
+  ctx.font = "11px system-ui";
+  ctx.fillText(`zoom ${Math.round(cam.zoom * 100)}%   |   pan ${cam.panX.toFixed(0)}, ${cam.panY.toFixed(0)}`, 8, 14);
+}
+
+resize();
+</script>
+</body>
+</html>
