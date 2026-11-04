@@ -77,7 +77,7 @@ func (d *Document) AddBlock(b *Block) *Block {
 		}
 	}
 	if b.W == 0 {
-		b.W, b.H = 120, 64
+		b.W, b.H = 30, 20 // мм: блок по умолчанию 30×20
 	}
 	d.Blocks = append(d.Blocks, b)
 	return b

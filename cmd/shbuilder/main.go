@@ -14,6 +14,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"slices"
 
 	"gioui.org/app"
 	"gioui.org/f32"
@@ -33,11 +34,16 @@ import (
 )
 
 const (
-	gridStep = 32.0
-	outset   = 16.0 // отступ выхода провода от пина (мировые юниты)
-	pinHitR  = 12.0 // радиус попадания в пин
-	pinSize  = 4.0  // половина размера пина на канве
+	pxPerMM  = 4.0     // масштаб «100%»: экранных пикселей на 1 мм мира
+	outset   = 5.0     // отступ выхода провода от пина, мм
+	pinHitR  = 3.0     // радиус попадания в пин, мм
+	pinSize  = 1.5     // половина размера пина, мм
+	arcR     = 1.6     // радиус арки на пересечении проводников, мм
+	worldMax = 50000.0 // граница мира, мм (рисуем сетку до неё)
 )
+
+// gridChoices — циклу по G: шаг сетки, мм.
+var gridChoices = [...]float32{5.0, 10.0, 20.0}
 
 // --- Режимы ввода ----------------------------------------------------------
 
@@ -55,6 +61,9 @@ type editor struct {
 	doc *core.Document
 	cam geom.Camera
 	th  *material.Theme
+
+	grid    float32 // шаг координатной сетки, мм
+	gridIdx int     // индекс в gridChoices (для цикла по G)
 
 	history core.History
 	file    string // путь текущего файла (аргумент CLI или schematic.json)
@@ -105,23 +114,25 @@ func newApp() *editor {
 	}
 
 	ed := &editor{
-		doc:  d,
-		cam:  geom.Camera{Zoom: 1},
-		th:   material.NewTheme(),
-		file: path,
-		msg:  msg,
+		doc:     d,
+		cam:     geom.Camera{Zoom: pxPerMM},
+		grid:    10, // мм (см. gridChoices[1])
+		gridIdx: 1,  // 10 мм — умолчание
+		th:      material.NewTheme(),
+		file:    path,
+		msg:     msg,
 	}
 	ed.history.Reset(d)
 	return ed
 }
 
-// demoScene — стартовая сцена: блоки 1–4 пинов, junction, перекрёстные линки.
+// demoScene — стартовая сцена в мм: блоки 1–4 пинов, junction, перекрёстные линки.
 func demoScene() *core.Document {
 	d := &core.Document{}
-	d.AddBlock(&core.Block{ID: "A", Kind: "src", X: 100, Y: 100, W: 120, H: 64, Label: "A", Pins: 2})
-	d.AddBlock(&core.Block{ID: "B", Kind: "hub", X: 460, Y: 220, W: 120, H: 64, Label: "B", Pins: 4})
-	d.AddBlock(&core.Block{ID: "C", Kind: "load", X: 140, Y: 480, W: 120, H: 64, Label: "C", Pins: 1})
-	d.AddBlock(&core.Block{ID: "D", Kind: "term", X: 520, Y: 560, W: 120, H: 64, Label: "D", Pins: 3})
+	d.AddBlock(&core.Block{ID: "A", Kind: "src", X: 40, Y: 40, W: 30, H: 20, Label: "A", Pins: 2})
+	d.AddBlock(&core.Block{ID: "B", Kind: "hub", X: 120, Y: 60, W: 30, H: 20, Label: "B", Pins: 4})
+	d.AddBlock(&core.Block{ID: "C", Kind: "load", X: 40, Y: 130, W: 30, H: 20, Label: "C", Pins: 1})
+	d.AddBlock(&core.Block{ID: "D", Kind: "term", X: 140, Y: 150, W: 30, H: 20, Label: "D", Pins: 3})
 	d.AddLink(core.Endpoint{BlockID: "A", Pin: 0}, core.Endpoint{BlockID: "B", Pin: 0})
 	d.AddLink(core.Endpoint{BlockID: "C", Pin: 0}, core.Endpoint{BlockID: "B", Pin: 0}) // junction на B.0
 	d.AddLink(core.Endpoint{BlockID: "A", Pin: 1}, core.Endpoint{BlockID: "D", Pin: 0})
@@ -228,11 +239,11 @@ func handleInput(q input.Source, ed *editor) {
 				if b := ed.drag; b != nil {
 					// сброс: snap + разрешение перекрытий («рядом», §1)
 					if ed.sel[b.ID] {
-						snapSelection(ed.doc, ed.sel)
-						pushOverlapsSet(ed.doc, ed.sel)
+						ed.snapSelection()
+						ed.pushOverlapsSel()
 					} else {
-						ed.doc.MoveBlock(b.ID, geom.Snap(b.X, gridStep), geom.Snap(b.Y, gridStep))
-						PushOverlaps(ed.doc, b.ID)
+						ed.doc.MoveBlock(b.ID, geom.Snap(b.X, ed.grid), geom.Snap(b.Y, ed.grid))
+						ed.pushOverlaps(b.ID)
 					}
 				}
 			case modeLink:
@@ -259,9 +270,23 @@ func handleInput(q input.Source, ed *editor) {
 	}
 }
 
-// PushOverlaps — тонкая обёртка над core.PushOverlaps (защищён = перетаскиваемый).
-func PushOverlaps(d *core.Document, protectedID string) {
-	core.PushOverlaps(d, map[string]bool{protectedID: true}, gridStep, 8)
+// PushOverlaps — тонкие обёртки над core.PushOverlaps с текущим шагом сетки.
+func (ed *editor) pushOverlaps(id string) {
+	core.PushOverlaps(ed.doc, map[string]bool{id: true}, ed.grid, 8)
+}
+
+func (ed *editor) pushOverlapsSel() {
+	core.PushOverlaps(ed.doc, selSet(ed.sel), ed.grid, 12)
+}
+
+// snapSelection — snap к текущей сетке для всех выделенных.
+func (ed *editor) snapSelection() {
+	for id := range ed.sel {
+		if b := ed.doc.BlockByID(id); b != nil {
+			b.X = geom.Snap(b.X, ed.grid)
+			b.Y = geom.Snap(b.Y, ed.grid)
+		}
+	}
 }
 
 // --- Выделение --------------------------------------------------------------
@@ -274,31 +299,15 @@ func selIDs(sel map[string]bool) []string {
 	return ids
 }
 
-// snapSelection — snap к сетке всех выделенных блоков.
-func snapSelection(d *core.Document, sel map[string]bool) {
-	for id := range sel {
-		if b := d.BlockByID(id); b != nil {
-			b.X = geom.Snap(b.X, gridStep)
-			b.Y = geom.Snap(b.Y, gridStep)
-		}
-	}
-}
-
-// pushOverlapsSet — расталкивание с защитой всего выделения целиком.
-func pushOverlapsSet(d *core.Document, sel map[string]bool) {
-	prot := make(map[string]bool, len(sel))
-	for id := range sel {
-		prot[id] = true
-	}
-	core.PushOverlaps(d, prot, gridStep, 12)
-}
+// selSet — карта выделения как она есть (для core.PushOverlaps).
+func selSet(sel map[string]bool) map[string]bool { return sel }
 
 // boxSelectFinish завершает рамку: заменяет/дополняет выделение пересечёнными
 // блоками; вырожденная рамка (клик по пустому) снимает выделение.
 func (ed *editor) boxSelectFinish(world geom.Vec, mods key.Modifiers) {
 	x0, x1 := min(ed.boxA.X, world.X), max(ed.boxA.X, world.X)
 	y0, y1 := min(ed.boxA.Y, world.Y), max(ed.boxA.Y, world.Y)
-	degenerate := (x1-x0) < 2 && (y1-y0) < 2
+	degenerate := (x1-x0) < 0.5 && (y1-y0) < 0.5 // мм: обычный клик без рамки
 	if degenerate {
 		ed.sel = nil
 		return
@@ -394,6 +403,11 @@ func processKey(k key.Event, ed *editor) {
 	case !mod && ed.mode == modeFree &&
 		(k.Name == key.NameDeleteForward || k.Name == key.NameDeleteBackward):
 		deleteAtCursor(ed)
+	case !mod && ed.mode == modeFree && (k.Name == "G" || k.Name == "g"):
+		// цикл шага сетки: 5 → 10 → 20 → 5 (мм), вызывается ДО arrangeKey
+		ed.gridIdx = (ed.gridIdx + 1) % len(gridChoices)
+		ed.grid = gridChoices[ed.gridIdx]
+		ed.msg = fmt.Sprintf("шаг сетки: %v мм", ed.grid)
 	case !mod && ed.mode == modeFree && len(k.Name) == 1:
 		arrangeKey(string(k.Name), shift, ed)
 	}
@@ -432,7 +446,7 @@ func arrangeKey(name string, shift bool, ed *editor) {
 		return
 	}
 	ed.history.Capture(ed.doc)
-	op(ed.doc, selIDs(ed.sel), gridStep)
+	op(ed.doc, selIDs(ed.sel), ed.grid)
 	if ed.history.Finish(ed.doc) {
 		ed.dirty = true
 	}
@@ -465,13 +479,13 @@ func addPinBlock(ed *editor, n int) {
 	ed.history.Capture(ed.doc)
 	b := ed.doc.AddBlock(&core.Block{
 		Kind: "block",
-		X:    geom.Snap(world.X-60, gridStep),
-		Y:    geom.Snap(world.Y-32, gridStep),
-		W:    120, H: 64,
+		X:    geom.Snap(world.X-15, ed.grid),
+		Y:    geom.Snap(world.Y-10, ed.grid),
+		W:    30, H: 20, // мм: блок по умолчанию 30×20
 		Pins: n,
 	})
 	b.Label = b.ID
-	PushOverlaps(ed.doc, b.ID) // не кладём поверх соседей — встаёт «рядом»
+	ed.pushOverlaps(b.ID) // не кладём поверх соседей — встаёт «рядом»
 	if ed.history.Finish(ed.doc) {
 		ed.dirty = true
 	}
@@ -502,8 +516,8 @@ func pasteClip(ed *editor) {
 		}
 	}
 	center := geom.Vec{X: (x0 + x1) / 2, Y: (y0 + y1) / 2}
-	dx := geom.Snap(world.X-center.X, gridStep)
-	dy := geom.Snap(world.Y-center.Y, gridStep)
+	dx := geom.Snap(world.X-center.X, ed.grid)
+	dy := geom.Snap(world.Y-center.Y, ed.grid)
 
 	ed.history.Capture(ed.doc)
 	newIDs := ed.doc.Paste(ed.clip, dx, dy)
@@ -511,7 +525,7 @@ func pasteClip(ed *editor) {
 	for _, id := range newIDs {
 		ed.sel[id] = true
 	}
-	pushOverlapsSet(ed.doc, ed.sel)
+	ed.pushOverlapsSel()
 	if ed.history.Finish(ed.doc) {
 		ed.dirty = true
 	}
@@ -625,32 +639,103 @@ func drawGrid(gtx layout.Context, ed *editor) {
 	maxW := ed.cam.ScreenToWorld(geom.Vec{X: w, Y: h})
 	minWx, minWy, maxWx, maxWy := minW.X, minW.Y, maxW.X, maxW.Y
 
-	startX := geom.Snap(max(minWx, 0), gridStep)
-	for x := startX; x <= min(maxWx, 100000); x += gridStep {
+	startX := geom.Snap(max(minWx, 0), ed.grid)
+	for x := startX; x <= min(maxWx, worldMax); x += ed.grid {
 		p1 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: max(minWy, 0)})
-		p2 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: min(maxWy, 100000)})
+		p2 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: min(maxWy, worldMax)})
 		drawSeg(gtx.Ops, p1, p2, 1, colGrid)
 	}
-	startY := geom.Snap(max(minWy, 0), gridStep)
-	for y := startY; y <= min(maxWy, 100000); y += gridStep {
+	startY := geom.Snap(max(minWy, 0), ed.grid)
+	for y := startY; y <= min(maxWy, worldMax); y += ed.grid {
 		p1 := ed.cam.WorldToScreen(geom.Vec{X: max(minWx, 0), Y: y})
-		p2 := ed.cam.WorldToScreen(geom.Vec{X: min(maxWx, 100000), Y: y})
+		p2 := ed.cam.WorldToScreen(geom.Vec{X: min(maxWx, worldMax), Y: y})
 		drawSeg(gtx.Ops, p1, p2, 1, colGrid)
 	}
 }
 
+// drawLinks рисует линки ортогональными маршрутами; пересечения разных
+// проводников на одной плоскости — «арка»: поздний линк перепрыгивает
+// ранний (мостик, §13.3), ранние рисуются сплошными.
 func drawLinks(gtx layout.Context, ed *editor) {
+	type seg struct{ a, b geom.Vec }
+	routes := make([][]seg, 0, len(ed.doc.Links))
 	for _, l := range ed.doc.Links {
 		p1, s1, ok1 := ed.doc.PinPos(l.From)
 		p2, s2, ok2 := ed.doc.PinPos(l.To)
 		if !ok1 || !ok2 {
+			routes = append(routes, nil)
 			continue
 		}
-		route := geom.Route(p1, s1, p2, s2, outset)
-		for i := 1; i < len(route); i++ {
-			a := ed.cam.WorldToScreen(route[i-1])
-			b := ed.cam.WorldToScreen(route[i])
-			drawSeg(gtx.Ops, a, b, 2, colLink)
+		r := geom.Route(p1, s1, p2, s2, outset)
+		segs := make([]seg, 0, len(r)-1)
+		for i := 1; i < len(r); i++ {
+			segs = append(segs, seg{a: r[i-1], b: r[i]})
+		}
+		routes = append(routes, segs)
+	}
+
+	for j, segs := range routes {
+		if segs == nil {
+			continue
+		}
+		// пересечения моего линка с более ранними → параметры вдоль сегментов
+		hopsPerSeg := make([][]float32, len(segs))
+		for i := 0; i < j; i++ {
+			for _, other := range routes[i] {
+				for u, s := range segs {
+					if pw, ok := geom.SegCross(s.a, s.b, other.a, other.b); ok {
+						a := ed.cam.WorldToScreen(s.a)
+						b := ed.cam.WorldToScreen(s.b)
+						pw := ed.cam.WorldToScreen(pw)
+						dx, dy := b.X-a.X, b.Y-a.Y
+						dst2 := dx*dx + dy*dy
+						if dst2 == 0 {
+							continue
+						}
+						hopsPerSeg[u] = append(hopsPerSeg[u],
+							((pw.X-a.X)*dx+(pw.Y-a.Y)*dy)/dst2)
+					}
+				}
+			}
+		}
+
+		for u, sg := range segs {
+			a := ed.cam.WorldToScreen(sg.a)
+			b := ed.cam.WorldToScreen(sg.b)
+			hops := hopsPerSeg[u]
+			if len(hops) == 0 {
+				drawSeg(gtx.Ops, a, b, 2, colLink)
+				continue
+			}
+			dx, dy := b.X-a.X, b.Y-a.Y
+			length := float32(math.Sqrt(float64(dx*dx + dy*dy)))
+			rpx := arcR * ed.cam.Zoom // радиус арки, пикселей
+			if length < 1 || rpx*2 >= length {
+				drawSeg(gtx.Ops, a, b, 2, colLink) // не протыкается — рисуем целиком
+				continue
+			}
+			slices.Sort(hops)
+			ux, uy := dx/length, dy/length
+			var p clip.Path
+			p.Begin(gtx.Ops)
+			p.MoveTo(f32.Point{X: a.X, Y: a.Y})
+			pass := float32(0) // пройдено вдоль сегмента, px
+			for _, t := range hops {
+				tp := t * length // позиция пересечения вдоль сегмента
+				if tp-rpx <= pass+0.5 || tp+rpx >= length {
+					continue // слишком тесно у конца/края — рисуем сплошняком
+				}
+				p.LineTo(f32.Point{X: a.X + ux*(tp-rpx), Y: a.Y + uy*(tp-rpx)})
+				c := f32.Point{X: a.X + ux*tp, Y: a.Y + uy*tp}
+				// равные фокусы = окружность с центром в точке пересечения;
+				// пол-оборота от входа мостика до выхода по другую сторону
+				p.ArcTo(c, c, math.Pi)
+				pass = tp + rpx
+			}
+			if pass < length-0.5 {
+				p.LineTo(f32.Point{X: b.X, Y: b.Y})
+			}
+			stroke(gtx.Ops, p.End(), 2, colLink)
 		}
 	}
 }
@@ -668,7 +753,7 @@ func drawRubber(gtx layout.Context, ed *editor) {
 		p2, s2, _ := ed.doc.PinPos(ed.linkTo)
 		pts = geom.Route(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset)
 	} else {
-		pts = geometryL(p1, ed.cam.ScreenToWorld(ed.cursor))
+		pts = rubberRoute(ed.doc, ed.linkFrom, ed.cam.ScreenToWorld(ed.cursor), outset)
 	}
 	col := colRubber
 	if ed.linkHover {
@@ -687,17 +772,65 @@ func sideOf(d *core.Document, ep core.Endpoint) geom.Side {
 	return s
 }
 
-func geometryL(p, c geom.Vec) []geom.Vec {
-	pts := []geom.Vec{p, {X: c.X, Y: p.Y}, c}
-	out := pts[:0]
-	var prev geom.Vec
-	for i, v := range pts {
-		if i == 0 || v != prev {
-			out = append(out, v)
-		}
-		prev = v
+// rubberRoute — предпросмотр резинки от пина до курсора: выход вдоль нормали
+// пина; курсор «вперёд» (по нормали) — одно колено, «назад» (под блок) —
+// обход по каналу за торцом блока, чтобы провод не перерезал блок.
+func rubberRoute(d *core.Document, ep core.Endpoint, c geom.Vec, out float32) []geom.Vec {
+	p, s, ok := d.PinPos(ep)
+	if !ok {
+		return []geom.Vec{c}
 	}
-	return out
+	b := d.BlockByID(ep.BlockID)
+	if b == nil {
+		return []geom.Vec{p, c}
+	}
+	r := b.Rect()
+	n := s.Normal()
+	e1 := p.Add(n.Scale(out)) // точка выхода за габарит
+	isH := s == geom.SideLeft || s == geom.SideRight
+
+	if isH {
+		// горизонтальный выход: сначала вдоль нормали, потом через X курсора
+		if (c.X-e1.X)*n.X >= 0 { // курсор «вперёд» — обычное колено
+			return geom.Clean([]geom.Vec{p, e1, {X: c.X, Y: e1.Y}, c})
+		}
+		// назад: вертикаль по внешней стороне грани, потом к курсору;
+		// подрезаем блок, если курсор в его Y-полосе
+		if c.Y <= r.Min.Y || c.Y >= r.Max.Y {
+			return geom.Clean([]geom.Vec{p, e1, {X: e1.X, Y: c.Y}, c})
+		}
+		lane := r.Max.Y + out // канал за нижним торцом
+		if c.Y < (r.Min.Y+r.Max.Y)/2 {
+			lane = r.Min.Y - out // курсор ближе к верхнему краю
+		}
+		return geom.Clean([]geom.Vec{p, e1, {X: e1.X, Y: lane}, {X: c.X, Y: lane}, c})
+	}
+
+	// вертикальный выход: сначала вдоль нормали, потом через Y курсора
+	lo, hi := minf(e1.Y, c.Y), maxf(e1.Y, c.Y)
+	blocked := lo < r.Max.Y && hi > r.Min.Y // вертикаль на e1.X режет блок?
+	if (c.Y-e1.Y)*n.Y >= 0 || !blocked {
+		return geom.Clean([]geom.Vec{p, e1, {X: e1.X, Y: c.Y}, c})
+	}
+	lane := r.Max.X + out // канал за правым торцом
+	if c.X < (r.Min.X+r.Max.X)/2 {
+		lane = r.Min.X - out
+	}
+	return geom.Clean([]geom.Vec{p, e1, {X: lane, Y: e1.Y}, {X: lane, Y: c.Y}, c})
+}
+
+func minf(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxf(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func drawBlocks(gtx layout.Context, ed *editor) {
@@ -714,10 +847,10 @@ func drawBlocks(gtx layout.Context, ed *editor) {
 		}
 		stroke(gtx.Ops, r.Path(), bw, border)
 
-		t := op.Offset(image.Pt(int(p.X)+10, int(p.Y)+6)).Push(gtx.Ops)
-		sz := 12 * ed.cam.Zoom
-		if sz < 6 {
-			sz = 6
+		t := op.Offset(image.Pt(int(p.X)+int(3*ed.cam.Zoom), int(p.Y)+int(2*ed.cam.Zoom))).Push(gtx.Ops)
+		sz := 3 * ed.cam.Zoom // ~3 мм шрифт
+		if sz < 8 {
+			sz = 8
 		}
 		l := material.Label(ed.th, unit.Sp(sz), b.Label)
 		l.Color = color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
@@ -767,9 +900,10 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	}
 	groups := len(ed.doc.LinkGroups())
 	free := len(ed.doc.FreePins())
-	info := fmt.Sprintf("%s%s | undo:%d redo:%d | sel:%d | blocks %d | links %d | clusters %d | free pins %d | zoom %d%%",
+	info := fmt.Sprintf("%s%s | undo:%d redo:%d | sel:%d | блоки %d | линки %d | cluster %d | своб.пины %d | сетка %v мм | зум %d%%",
 		ed.file, dirtyMark, undoN, redoN, len(ed.sel),
-		len(ed.doc.Blocks), len(ed.doc.Links), groups, free, int(ed.cam.Zoom*100))
+		len(ed.doc.Blocks), len(ed.doc.Links), groups, free,
+		ed.grid, int(ed.cam.Zoom/pxPerMM*100))
 	if ed.mode == modeLink {
 		info += "   |   тянем от пина — отпусти на целевом пине"
 	}
@@ -778,7 +912,7 @@ func drawHUD(gtx layout.Context, ed *editor) {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
-	hint := "1..6: блок с N пинами   Del: удалить   Ctrl+C/V: копить/вставить   " +
+	hint := "1..6: блок с N пинами   G: шаг сетки   Del: удалить   Ctrl+C/V: копировать/вставить   " +
 		"рамка на пустом: выделить   Shift+клик: +выделение   A/R/T/B: края   " +
 		"H/V: центры   D: распределить   Ctrl+Z/Y: undo/redo   Ctrl+A: все   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
@@ -832,7 +966,10 @@ func run(w *app.Window) error {
 			drawFrame(gtx, ed)
 			e.Frame(ops)
 		case app.DestroyEvent:
-			return nil
+			// gio.app.Main() в v0.10 не умеет закрывать пустой пул окон:
+			// после выхода последнего окна словим "all goroutines asleep".
+			// Выходим сами, спокойно.
+			os.Exit(0)
 		}
 	}
 }

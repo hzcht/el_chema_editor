@@ -105,6 +105,64 @@ func clampZoom(z float32) float32 {
 	return z
 }
 
+// --- Пересечения осевых отрезков -------------------------------------------
+
+// SegCross — точка пересечения двух ось-выровненных отрезков (H2V/V2H).
+// Возвращает false для параллельных, вырожденных или касающихся
+// только на концах (те — узлы, а не пересечения проводников).
+func SegCross(a1, a2, b1, b2 Vec) (Vec, bool) {
+	ah := axisSeg(a1, a2)
+	bh := axisSeg(b1, b2)
+	if ah == nil || bh == nil {
+		return Vec{}, false // вырожденные (нулевые) отрезки
+	}
+	if *ah == *bh {
+		return Vec{}, false // параллельные (или коллинеарные поверх)
+	}
+	// горизонтальный a × вертикальный b (или наоборот)
+	hl, vl := [2]Vec{a1, a2}, [2]Vec{b1, b2}
+	if !*ah {
+		hl, vl = [2]Vec{b1, b2}, [2]Vec{a1, a2}
+	}
+	hx := lo(hl[0].X, hl[1].X)-eps <= vl[0].X && vl[0].X <= hi(hl[0].X, hl[1].X)+eps
+	vy := lo(vl[0].Y, vl[1].Y)-eps <= hl[0].Y && hl[0].Y <= hi(vl[0].Y, vl[1].Y)+eps
+	p := Vec{X: vl[0].X, Y: hl[0].Y}
+	// касание на конце = совпадающие точки/узлы, арку не строим
+	if !hx || !vy || near(p, hl[0]) || near(p, hl[1]) || near(p, vl[0]) || near(p, vl[1]) {
+		return Vec{}, false
+	}
+	return p, true
+}
+
+// axisSeg: nil — вырожденный; true — горизонтальный, false — вертикальный.
+func axisSeg(a, b Vec) *bool {
+	ha := nearf(a.Y, b.Y)
+	va := nearf(a.X, b.X)
+	switch {
+	case ha && !va:
+		h := true
+		return &h
+	case va && !ha:
+		h := false
+		return &h
+	}
+	return nil
+}
+
+func lo(a, b float32) float32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func hi(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // --- Маршрутизация ---------------------------------------------------------
 
 // Route строит ортогональный маршрут pin→pin с отступом наружу от каждой
@@ -112,11 +170,11 @@ func clampZoom(z float32) float32 {
 // (резиновая скрутка) сведутся к L-колену по x.
 func Route(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32) []Vec {
 	if s1 == SideNone || s2 == SideNone {
-		return clean([]Vec{p1, {p2.X, p1.Y}, p2})
+		return Clean([]Vec{p1, {X: p2.X, Y: p1.Y}, p2})
 	}
 	e1 := p1.Add(s1.Normal().Scale(out))
 	e2 := p2.Add(s2.Normal().Scale(out))
-	return clean(pathFor(p1, s1, e1, p2, s2, e2))
+	return Clean(pathFor(p1, s1, e1, p2, s2, e2))
 }
 
 func pathFor(p1 Vec, s1 Side, e1 Vec, p2 Vec, s2 Side, e2 Vec) []Vec {
@@ -172,8 +230,9 @@ func pathFor(p1 Vec, s1 Side, e1 Vec, p2 Vec, s2 Side, e2 Vec) []Vec {
 	}
 }
 
-// clean убирает дубли подряд и коллинеарные промежуточные точки.
-func clean(pts []Vec) []Vec {
+// Clean убирает дубли подряд и коллинеарные промежуточные точки,
+// сохраняя точки разворота (hairpin).
+func Clean(pts []Vec) []Vec {
 	res := make([]Vec, 0, len(pts))
 	for _, p := range pts {
 		if len(res) == 0 || !near(res[len(res)-1], p) {
