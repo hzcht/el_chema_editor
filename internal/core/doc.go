@@ -10,12 +10,14 @@ import (
 
 // Block — объект канвы этапа 1: графика + подпись + пины (без физического типа).
 type Block struct {
-	ID    string
-	Kind  string  // тип для палитры/иконки (этап 2 станет физическим классом)
-	X, Y  float32 // мировые координаты верхнего левого угла
-	W, H  float32
-	Label string
-	Pins  int // количество коннекторов (раскладка — PinLayout)
+	ID    string  `json:"id"`
+	Kind  string  `json:"kind,omitempty"` // тип для палитры/иконки (этап 2 станет физическим классом)
+	X     float32 `json:"x"`              // мировые координаты верхнего левого угла
+	Y     float32 `json:"y"`
+	W     float32 `json:"w"`
+	H     float32 `json:"h"`
+	Label string  `json:"label,omitempty"`
+	Pins  int     `json:"pins"` // количество коннекторов (раскладка — PinLayout)
 }
 
 func (b *Block) Rect() geom.Rect { return geom.NewRect(b.X, b.Y, b.W, b.H) }
@@ -42,15 +44,16 @@ func (b *Block) PinPos(i int) (geom.Vec, geom.Side, bool) {
 
 // Endpoint — конец линка: конкретный пин конкретного блока.
 type Endpoint struct {
-	BlockID string
-	Pin     int
+	BlockID string `json:"block"`
+	Pin     int    `json:"pin"`
 }
 
 func (e Endpoint) String() string { return fmt.Sprintf("%s.%d", e.BlockID, e.Pin) }
 
-// Link — связь пин→пин. Мульссылки на один пин допустимы (junction-кластер).
+// Link — связь пин→пин. Мультилинки на один пин допустимы (junction-кластер).
 type Link struct {
-	From, To Endpoint
+	From Endpoint `json:"from"`
+	To   Endpoint `json:"to"`
 }
 
 // Document — единственный источник истины о схеме (§3).

@@ -5,16 +5,21 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
+	"io/fs"
 	"log"
 	"math"
+	"os"
 
 	"gioui.org/app"
 	"gioui.org/f32"
 	"gioui.org/io/event"
 	"gioui.org/io/input"
+	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -50,6 +55,11 @@ type editor struct {
 	cam geom.Camera
 	th  *material.Theme
 
+	history core.History
+	file    string // путь текущего файла (аргумент CLI или schematic.json)
+	dirty   bool
+	msg     string // статусное сообщение (save/load/undo/info)
+
 	mode mode
 
 	// drag блока
@@ -69,6 +79,39 @@ type editor struct {
 }
 
 func newApp() *editor {
+	path := "schematic.json"
+	if len(os.Args) > 1 {
+		path = os.Args[1]
+	}
+	d := &core.Document{}
+	msg := ""
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, d); err != nil {
+			msg = "load: " + err.Error()
+			d = &core.Document{} // битый файл не используем
+		} else {
+			msg = fmt.Sprintf("открыт %s: %d блоков", path, len(d.Blocks))
+		}
+	} else if errors.Is(err, fs.ErrNotExist) {
+		msg = "новая схема: " + path + " (демо-сцена)"
+		d = demoScene()
+	} else {
+		msg = "read: " + err.Error()
+	}
+
+	ed := &editor{
+		doc:  d,
+		cam:  geom.Camera{Zoom: 1},
+		th:   material.NewTheme(),
+		file: path,
+		msg:  msg,
+	}
+	ed.history.Reset(d)
+	return ed
+}
+
+// demoScene — стартовая сцена: блоки 1–4 пинов, junction, перекрёстные линки.
+func demoScene() *core.Document {
 	d := &core.Document{}
 	d.AddBlock(&core.Block{ID: "A", Kind: "src", X: 100, Y: 100, W: 120, H: 64, Label: "A", Pins: 2})
 	d.AddBlock(&core.Block{ID: "B", Kind: "hub", X: 460, Y: 220, W: 120, H: 64, Label: "B", Pins: 4})
@@ -77,12 +120,7 @@ func newApp() *editor {
 	d.AddLink(core.Endpoint{"A", 0}, core.Endpoint{"B", 0})
 	d.AddLink(core.Endpoint{"C", 0}, core.Endpoint{"B", 0}) // junction на B.0
 	d.AddLink(core.Endpoint{"A", 1}, core.Endpoint{"D", 0})
-
-	return &editor{
-		doc: d,
-		cam: geom.Camera{Zoom: 1},
-		th:  material.NewTheme(),
-	}
+	return d
 }
 
 // --- Ввод ------------------------------------------------------------------
@@ -113,6 +151,7 @@ func handleInput(q input.Source, ed *editor) {
 			if !e.Buttons.Contain(pointer.ButtonPrimary) {
 				continue
 			}
+			ed.history.Capture(ed.doc) // pre-state: undo восстановит позицию до драга/линка
 			// приоритет: пин > блок > пусто (пан)
 			if ep, ok := ed.doc.HitPin(world, pinHitR); ok {
 				ed.mode = modeLink
@@ -153,8 +192,15 @@ func handleInput(q input.Source, ed *editor) {
 				}
 			case modeLink:
 				if ed.linkHover {
-					ed.doc.AddLink(ed.linkFrom, ed.linkTo)
+					if ed.doc.AddLink(ed.linkFrom, ed.linkTo) {
+						ed.msg = fmt.Sprintf("линк %v → %v", ed.linkFrom, ed.linkTo)
+					} else {
+						ed.msg = fmt.Sprintf("линк %v → %v уже существует", ed.linkFrom, ed.linkTo)
+					}
 				}
+			}
+			if ed.history.Finish(ed.doc) {
+				ed.dirty = true
 			}
 			ed.mode = modeFree
 			ed.drag = nil
@@ -169,6 +215,142 @@ func handleInput(q input.Source, ed *editor) {
 // PushOverlaps — тонкая обёртка над core.PushOverlaps (защищён = перетаскиваемый).
 func PushOverlaps(d *core.Document, protectedID string) {
 	core.PushOverlaps(d, map[string]bool{protectedID: true}, gridStep, 8)
+}
+
+// --- Клавиатура -------------------------------------------------------------
+
+var keyTag = new(struct{})
+
+// handleKeys потребляет key-события текущего кадра.
+func handleKeys(q input.Source, ed *editor) {
+	for {
+		ke, ok := q.Event(key.Filter{Focus: keyTag}) // пустое Name — все клавиши
+		if !ok {
+			break
+		}
+		k, ok := ke.(key.Event)
+		if !ok || k.State != key.Press {
+			continue // реагируем только на нажатие
+		}
+		processKey(k, ed)
+	}
+}
+
+// processKey — хоткеи. Ctrl — key.ModShortcut (на Windows Ctrl, на mac Cmd).
+func processKey(k key.Event, ed *editor) {
+	mod := k.Modifiers.Contain(key.ModShortcut)
+	switch {
+	case mod && k.Name == "Z":
+		if ed.mode != modeFree {
+			return // во время драга не дёргаем (указатели ed.drag протухли бы)
+		}
+		if k.Modifiers.Contain(key.ModShift) {
+			redoMark(ed)
+		} else {
+			undoMark(ed)
+		}
+	case mod && k.Name == "Y":
+		if ed.mode != modeFree {
+			return
+		}
+		redoMark(ed)
+	case mod && k.Name == "S":
+		saveDoc(ed)
+	case mod && k.Name == "O":
+		loadDoc(ed)
+	case !mod && ed.mode == modeFree && len(k.Name) == 1 && k.Name[0] >= '1' && k.Name[0] <= '6':
+		addPinBlock(ed, int(k.Name[0]-'0'))
+	case !mod && ed.mode == modeFree &&
+		(k.Name == key.NameDeleteForward || k.Name == key.NameDeleteBackward):
+		deleteAtCursor(ed)
+	}
+}
+
+func undoMark(ed *editor) {
+	if ed.history.Undo(ed.doc) {
+		ed.dirty = true
+		ed.msg = "undo"
+	} else {
+		ed.msg = "undo: истории нет"
+	}
+}
+
+func redoMark(ed *editor) {
+	if ed.history.Redo(ed.doc) {
+		ed.dirty = true
+		ed.msg = "redo"
+	} else {
+		ed.msg = "redo: нечего повторять"
+	}
+}
+
+// addPinBlock — новый блок с n пинами под курсором (клавиши 1..6).
+func addPinBlock(ed *editor, n int) {
+	world := ed.cam.ScreenToWorld(ed.cursor)
+	ed.history.Capture(ed.doc)
+	b := ed.doc.AddBlock(&core.Block{
+		Kind: "block",
+		X:    geom.Snap(world.X-60, gridStep),
+		Y:    geom.Snap(world.Y-32, gridStep),
+		W:    120, H: 64,
+		Pins: n,
+	})
+	b.Label = b.ID
+	PushOverlaps(ed.doc, b.ID) // не кладём поверх соседей — встаёт «рядом»
+	if ed.history.Finish(ed.doc) {
+		ed.dirty = true
+	}
+	ed.msg = fmt.Sprintf("добавлен %s (пинов %d)", b.ID, n)
+}
+
+// deleteAtCursor — Del/Backspace удаляет блок под курсором вместе с его линками.
+func deleteAtCursor(ed *editor) {
+	world := ed.cam.ScreenToWorld(ed.cursor)
+	b := ed.doc.HitBlock(world)
+	if b == nil {
+		ed.msg = "под курсором нет блока"
+		return
+	}
+	id := b.ID
+	ed.history.Capture(ed.doc)
+	ed.doc.RemoveBlock(id)
+	if ed.history.Finish(ed.doc) {
+		ed.dirty = true
+	}
+	ed.msg = "удалён " + id
+}
+
+// --- Файлы ------------------------------------------------------------------
+
+func saveDoc(ed *editor) {
+	data, err := json.Marshal(ed.doc)
+	if err != nil {
+		ed.msg = fmt.Sprintf("save: %v", err)
+		return
+	}
+	if err := os.WriteFile(ed.file, data, 0o644); err != nil {
+		ed.msg = fmt.Sprintf("save: %v", err)
+		return
+	}
+	ed.dirty = false
+	ed.msg = "сохранено " + ed.file
+}
+
+func loadDoc(ed *editor) {
+	data, err := os.ReadFile(ed.file)
+	if err != nil {
+		ed.msg = fmt.Sprintf("load: %v", err)
+		return
+	}
+	nd := &core.Document{}
+	if err := json.Unmarshal(data, nd); err != nil {
+		ed.msg = fmt.Sprintf("load: %v", err)
+		return
+	}
+	ed.doc = nd
+	ed.history.Reset(nd)
+	ed.dirty = false
+	ed.msg = fmt.Sprintf("загружен %s (%d блоков)", ed.file, len(nd.Blocks))
 }
 
 // --- Отрисовка -------------------------------------------------------------
@@ -331,16 +513,36 @@ func drawPins(gtx layout.Context, ed *editor) {
 }
 
 func drawHUD(gtx layout.Context, ed *editor) {
+	undoN, redoN := ed.history.Depth()
+	dirtyMark := " "
+	if ed.dirty {
+		dirtyMark = " •"
+	}
 	groups := len(ed.doc.LinkGroups())
 	free := len(ed.doc.FreePins())
-	txt := fmt.Sprintf("blocks %d | links %d | pin groups %d | free pins %d | zoom %d%%",
+	info := fmt.Sprintf("%s%s | undo:%d redo:%d | blocks %d | links %d | clusters %d | free pins %d | zoom %d%%",
+		ed.file, dirtyMark, undoN, redoN,
 		len(ed.doc.Blocks), len(ed.doc.Links), groups, free, int(ed.cam.Zoom*100))
 	if ed.mode == modeLink {
-		txt += "   |   тянем от пина — отпусти на целевом пине"
+		info += "   |   тянем от пина — отпусти на целевом пине"
 	}
-	l := material.Label(ed.th, unit.Sp(11), txt)
-	l.Color = colText
+	drawHUDLine(gtx, ed.th, info, 0, colText)
+	if ed.msg != "" {
+		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
+	}
+	h := float32(gtx.Constraints.Max.Y)
+	hint := "1..6: блок с N пинами   Del: удалить под курсором   тянуть с пина: линк   " +
+		"Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
+	drawHUDLine(gtx, ed.th, hint, h-18, colText)
+}
+
+// drawHUDLine — одна строка HUD со смещением от верхнего левого угла (и цветом).
+func drawHUDLine(gtx layout.Context, th *material.Theme, txt string, dy float32, c color.NRGBA) {
+	t := op.Offset(image.Pt(0, int(dy))).Push(gtx.Ops)
+	l := material.Label(th, unit.Sp(11), txt)
+	l.Color = c
 	l.Layout(gtx)
+	t.Pop()
 }
 
 // --- Gio текстовые примитивы ------------------------------------------------
@@ -376,7 +578,9 @@ func run(w *app.Window) error {
 			ops := new(op.Ops)
 			gtx := app.NewContext(ops, e)
 			event.Op(gtx.Ops, canvasTag)
+			e.Source.Execute(key.FocusCmd{Tag: keyTag}) // канва держит фокус клавиатуры
 			handleInput(e.Source, ed)
+			handleKeys(e.Source, ed)
 			drawFrame(gtx, ed)
 			e.Frame(ops)
 		case app.DestroyEvent:
