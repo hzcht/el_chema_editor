@@ -122,9 +122,9 @@ func demoScene() *core.Document {
 	d.AddBlock(&core.Block{ID: "B", Kind: "hub", X: 460, Y: 220, W: 120, H: 64, Label: "B", Pins: 4})
 	d.AddBlock(&core.Block{ID: "C", Kind: "load", X: 140, Y: 480, W: 120, H: 64, Label: "C", Pins: 1})
 	d.AddBlock(&core.Block{ID: "D", Kind: "term", X: 520, Y: 560, W: 120, H: 64, Label: "D", Pins: 3})
-	d.AddLink(core.Endpoint{"A", 0}, core.Endpoint{"B", 0})
-	d.AddLink(core.Endpoint{"C", 0}, core.Endpoint{"B", 0}) // junction на B.0
-	d.AddLink(core.Endpoint{"A", 1}, core.Endpoint{"D", 0})
+	d.AddLink(core.Endpoint{BlockID: "A", Pin: 0}, core.Endpoint{BlockID: "B", Pin: 0})
+	d.AddLink(core.Endpoint{BlockID: "C", Pin: 0}, core.Endpoint{BlockID: "B", Pin: 0}) // junction на B.0
+	d.AddLink(core.Endpoint{BlockID: "A", Pin: 1}, core.Endpoint{BlockID: "D", Pin: 0})
 	return d
 }
 
@@ -147,7 +147,7 @@ func handleInput(q input.Source, ed *editor) {
 		if !ok {
 			continue
 		}
-		scr := geom.Vec{e.Position.X, e.Position.Y}
+		scr := geom.Vec{X: e.Position.X, Y: e.Position.Y}
 		ed.cursor = scr
 		world := ed.cam.ScreenToWorld(scr)
 
@@ -179,7 +179,7 @@ func handleInput(q input.Source, ed *editor) {
 					}
 					ed.mode = modeDragBlock
 					ed.drag = b
-					ed.dragOff = world.Sub(geom.Vec{b.X, b.Y})
+					ed.dragOff = world.Sub(geom.Vec{X: b.X, Y: b.Y})
 					ed.dragLast = world
 				} else {
 					ed.mode = modeBoxSelect
@@ -501,7 +501,7 @@ func pasteClip(ed *editor) {
 			y1 = b.Y + b.H
 		}
 	}
-	center := geom.Vec{(x0 + x1) / 2, (y0 + y1) / 2}
+	center := geom.Vec{X: (x0 + x1) / 2, Y: (y0 + y1) / 2}
 	dx := geom.Snap(world.X-center.X, gridStep)
 	dy := geom.Snap(world.Y-center.Y, gridStep)
 
@@ -612,8 +612,8 @@ func drawSelBox(gtx layout.Context, ed *editor) {
 	if (x1-x0) < 1 || (y1-y0) < 1 {
 		return
 	}
-	a := ed.cam.WorldToScreen(geom.Vec{x0, y0})
-	b := ed.cam.WorldToScreen(geom.Vec{x1, y1})
+	a := ed.cam.WorldToScreen(geom.Vec{X: x0, Y: y0})
+	b := ed.cam.WorldToScreen(geom.Vec{X: x1, Y: y1})
 	r := clip.Rect{Min: image.Pt(int(a.X), int(a.Y)), Max: image.Pt(int(b.X), int(b.Y))}
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x28}, r.Op())
 	stroke(gtx.Ops, r.Path(), 1.5, colLink)
@@ -627,14 +627,14 @@ func drawGrid(gtx layout.Context, ed *editor) {
 
 	startX := geom.Snap(max(minWx, 0), gridStep)
 	for x := startX; x <= min(maxWx, 100000); x += gridStep {
-		p1 := ed.cam.WorldToScreen(geom.Vec{x, max(minWy, 0)})
-		p2 := ed.cam.WorldToScreen(geom.Vec{x, min(maxWy, 100000)})
+		p1 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: max(minWy, 0)})
+		p2 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: min(maxWy, 100000)})
 		drawSeg(gtx.Ops, p1, p2, 1, colGrid)
 	}
 	startY := geom.Snap(max(minWy, 0), gridStep)
 	for y := startY; y <= min(maxWy, 100000); y += gridStep {
-		p1 := ed.cam.WorldToScreen(geom.Vec{max(minWx, 0), y})
-		p2 := ed.cam.WorldToScreen(geom.Vec{min(maxWx, 100000), y})
+		p1 := ed.cam.WorldToScreen(geom.Vec{X: max(minWx, 0), Y: y})
+		p2 := ed.cam.WorldToScreen(geom.Vec{X: min(maxWx, 100000), Y: y})
 		drawSeg(gtx.Ops, p1, p2, 1, colGrid)
 	}
 }
@@ -688,7 +688,7 @@ func sideOf(d *core.Document, ep core.Endpoint) geom.Side {
 }
 
 func geometryL(p, c geom.Vec) []geom.Vec {
-	pts := []geom.Vec{p, {c.X, p.Y}, c}
+	pts := []geom.Vec{p, {X: c.X, Y: p.Y}, c}
 	out := pts[:0]
 	var prev geom.Vec
 	for i, v := range pts {
@@ -702,8 +702,8 @@ func geometryL(p, c geom.Vec) []geom.Vec {
 
 func drawBlocks(gtx layout.Context, ed *editor) {
 	for _, b := range ed.doc.Blocks {
-		p := ed.cam.WorldToScreen(geom.Vec{b.X, b.Y})
-		s := ed.cam.WorldToScreen(geom.Vec{b.X + b.W, b.Y + b.H})
+		p := ed.cam.WorldToScreen(geom.Vec{X: b.X, Y: b.Y})
+		s := ed.cam.WorldToScreen(geom.Vec{X: b.X + b.W, Y: b.Y + b.H})
 		r := clip.Rect{Min: image.Pt(int(p.X), int(p.Y)), Max: image.Pt(int(s.X), int(s.Y))}
 		paint.FillShape(gtx.Ops, colBlock, r.Op())
 		border := colBord

@@ -31,13 +31,13 @@ func (b *Block) PinPos(i int) (geom.Vec, geom.Side, bool) {
 	pin := layout[i]
 	switch pin.Side {
 	case geom.SideLeft:
-		return geom.Vec{b.X, b.Y + pin.T*b.H}, pin.Side, true
+		return geom.Vec{X: b.X, Y: b.Y + pin.T*b.H}, pin.Side, true
 	case geom.SideRight:
-		return geom.Vec{b.X + b.W, b.Y + pin.T*b.H}, pin.Side, true
+		return geom.Vec{X: b.X + b.W, Y: b.Y + pin.T*b.H}, pin.Side, true
 	case geom.SideTop:
-		return geom.Vec{b.X + pin.T*b.W, b.Y}, pin.Side, true
+		return geom.Vec{X: b.X + pin.T*b.W, Y: b.Y}, pin.Side, true
 	case geom.SideBottom:
-		return geom.Vec{b.X + pin.T*b.W, b.Y + b.H}, pin.Side, true
+		return geom.Vec{X: b.X + pin.T*b.W, Y: b.Y + b.H}, pin.Side, true
 	}
 	return geom.Vec{}, geom.SideNone, false
 }

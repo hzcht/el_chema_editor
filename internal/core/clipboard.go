@@ -78,5 +78,5 @@ func BoundsCenterOf(d *Document, ids []string) (geom.Vec, bool) {
 			y1 = b.Y + b.H
 		}
 	}
-	return geom.Vec{(x0 + x1) / 2, (y0 + y1) / 2}, true
+	return geom.Vec{X: (x0 + x1) / 2, Y: (y0 + y1) / 2}, true
 }

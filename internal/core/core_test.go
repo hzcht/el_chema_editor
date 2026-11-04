@@ -35,7 +35,7 @@ func TestPinLayout(t *testing.T) {
 func TestBlockPinPos(t *testing.T) {
 	b := &Block{X: 100, Y: 50, W: 120, H: 64, Pins: 4}
 	pos, side, ok := b.PinPos(0)
-	if !ok || side != geom.SideLeft || pos != (geom.Vec{100, 50 + 32}) {
+	if !ok || side != geom.SideLeft || pos != (geom.Vec{X: 100, Y: 50 + 32}) {
 		t.Fatalf("левый пин: %v %v", pos, side)
 	}
 	pos, side, ok = b.PinPos(3)
@@ -60,7 +60,7 @@ func TestDocumentCRUD(t *testing.T) {
 	if a.X != 10 || a.Y != 20 {
 		t.Fatal("MoveBlock не сработал")
 	}
-	if d.HitBlock(geom.Vec{15, 25}) != a || d.HitBlock(geom.Vec{500, 500}) != nil {
+	if d.HitBlock(geom.Vec{X: 15, Y: 25}) != a || d.HitBlock(geom.Vec{X: 500, Y: 500}) != nil {
 		t.Fatal("HitBlock: промахи")
 	}
 }
@@ -142,7 +142,7 @@ func TestPinPosViaDocument(t *testing.T) {
 	d := newDoc()
 	a := d.AddBlock(&Block{X: 10, Y: 20, W: 120, H: 64, Pins: 3})
 	pos, side, ok := d.PinPos(Endpoint{a.ID, 1})
-	if !ok || side != geom.SideRight || pos != (geom.Vec{130, 52}) {
+	if !ok || side != geom.SideRight || pos != (geom.Vec{X: 130, Y: 52}) {
 		t.Fatalf("PinPos через документ: %v %v %v", pos, side, ok)
 	}
 }
