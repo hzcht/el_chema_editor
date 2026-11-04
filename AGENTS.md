@@ -51,9 +51,15 @@ Gotchas (cost debugging time once — do not rediscover):
 - **`go build ./...` DOES write `shbuilder.exe` to repo root** (main package); when a
   fresh binary is needed for a smoke-run, build with explicit `-o shbuilder.exe ./cmd/shbuilder`.
 - **Editor hotkeys (stage 1)**: `1..6` add a block with N pins at cursor, `Del` deletes
-  the block under cursor, drag-from-pin creates a link, `Ctrl+Z/Y` undo/redo,
-  `Ctrl+S/O` save/load. Undo granularity: Capture-on-press / Finish-on-release
-  (idle clicks don't pollute history — `core.History`).
+  the selection (or block under cursor), `G` cycles grid step 5/10/20 mm, drag-from-pin
+  creates a link (rubber exits along the pin normal, lane-bypass when pulled backwards),
+  wire crossings draw as hop arcs (later link hops over earlier), `Ctrl+Z/Y` undo/redo,
+  `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press /
+  Finish-on-release (idle clicks don't pollute history — `core.History`).
+- **World unit = 1 mm** (ADR-0006): zoom 100% = 4 px/mm, default block 30×20 mm,
+  all coordinates snap to the current grid step. JSON v1 stores plain unitless
+  floats — no migration needed; old files just show bigger-than-grid coords
+  (resnap by hand).
 - **Wails needs `-tags desktop,production`** (or `dev`) — plain `go build` yields exit 0
   with no window and no error.
 - **Fyne needs cgo+MinGW** — impossible on this machine; spike code kept but not buildable.
