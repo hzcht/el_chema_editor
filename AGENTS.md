@@ -33,8 +33,12 @@ rewrite of the author's old Pascal/Delphi school project). **No code exists yet.
 Toolchain: Go 1.27, git; **CGO_ENABLED=0 and no C compiler** on this machine.
 
 ```powershell
-# Main module (no GUI deps yet): verify right after any change
+# Main module (GUI app lives here now): verify right after any change
 go build ./... ; go test ./...
+
+# Run the editor (stage 1): optional arg = path to JSON file (default schematic.json)
+go build -o shbuilder.exe ./cmd/shbuilder ; .\shbuilder.exe           # demo scene
+.\shbuilder.exe path\to\scheme.json                                   # open a file
 
 # Spike Gio — builds WITHOUT cgo
 cd spike/gio   ; go build -o spike-gio.exe .   ; .\spike-gio.exe
@@ -44,6 +48,12 @@ cd spike/wails ; go build -tags desktop,production -o spike-wails.exe . ; .\spik
 ```
 
 Gotchas (cost debugging time once — do not rediscover):
+- **`go build ./...` DOES write `shbuilder.exe` to repo root** (main package); when a
+  fresh binary is needed for a smoke-run, build with explicit `-o shbuilder.exe ./cmd/shbuilder`.
+- **Editor hotkeys (stage 1)**: `1..6` add a block with N pins at cursor, `Del` deletes
+  the block under cursor, drag-from-pin creates a link, `Ctrl+Z/Y` undo/redo,
+  `Ctrl+S/O` save/load. Undo granularity: Capture-on-press / Finish-on-release
+  (idle clicks don't pollute history — `core.History`).
 - **Wails needs `-tags desktop,production`** (or `dev`) — plain `go build` yields exit 0
   with no window and no error.
 - **Fyne needs cgo+MinGW** — impossible on this machine; spike code kept but not buildable.
