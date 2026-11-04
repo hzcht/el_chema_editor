@@ -48,6 +48,7 @@ const (
 	modeDragBlock
 	modePan
 	modeLink
+	modeBoxSelect // рамка выделения (левый клик по пустому)
 )
 
 type editor struct {
@@ -63,8 +64,11 @@ type editor struct {
 	mode mode
 
 	// drag блока
-	drag    *core.Block
-	dragOff geom.Vec
+	drag       *core.Block
+	dragOff    geom.Vec
+	dragLast   geom.Vec        // world-точка пред. кадра драга (для delta группы)
+	sel        map[string]bool // выделение по ID блоков
+	boxA, boxB geom.Vec        // рамка выделения (мировые точки)
 
 	// pan
 	panStart geom.Vec
@@ -148,31 +152,64 @@ func handleInput(q input.Source, ed *editor) {
 
 		switch e.Kind {
 		case pointer.Press:
-			if !e.Buttons.Contain(pointer.ButtonPrimary) {
-				continue
-			}
-			ed.history.Capture(ed.doc) // pre-state: undo восстановит позицию до драга/линка
-			// приоритет: пин > блок > пусто (пан)
-			if ep, ok := ed.doc.HitPin(world, pinHitR); ok {
-				ed.mode = modeLink
-				ed.linkFrom = ep
-				ed.linkHover = false
-			} else if b := ed.doc.HitBlock(world); b != nil {
-				ed.mode = modeDragBlock
-				ed.drag = b
-				ed.dragOff = world.Sub(geom.Vec{b.X, b.Y})
-			} else {
+			switch {
+			case e.Buttons.Contain(pointer.ButtonPrimary):
+				ed.history.Capture(ed.doc) // pre-state: undo восстановит позицию до драга/линка
+				// приоритет: пин > блок > пустое (рамка выделения)
+				if ep, ok := ed.doc.HitPin(world, pinHitR); ok {
+					ed.mode = modeLink
+					ed.linkFrom = ep
+					ed.linkHover = false
+				} else if b := ed.doc.HitBlock(world); b != nil {
+					// Shift+клик — добавить/убрать из выделения; простой клик
+					// по невыполненному — заменить выделение; по выбранному —
+					// оставить группу (drag группы)
+					if e.Modifiers.Contain(key.ModShift) {
+						if ed.sel == nil {
+							ed.sel = map[string]bool{}
+						}
+						if ed.sel[b.ID] {
+							delete(ed.sel, b.ID)
+						} else {
+							ed.sel[b.ID] = true
+						}
+					} else if !ed.sel[b.ID] {
+						ed.sel = map[string]bool{b.ID: true}
+					}
+					ed.mode = modeDragBlock
+					ed.drag = b
+					ed.dragOff = world.Sub(geom.Vec{b.X, b.Y})
+					ed.dragLast = world
+				} else {
+					ed.mode = modeBoxSelect
+					ed.boxA, ed.boxB = world, world
+				}
+				q.Execute(pointer.GrabCmd{Tag: canvasTag, ID: e.PointerID})
+
+			case e.Buttons.Contain(pointer.ButtonSecondary):
 				ed.mode = modePan
 				ed.panStart = scr
 				ed.panFrom = ed.cam
+				q.Execute(pointer.GrabCmd{Tag: canvasTag, ID: e.PointerID})
 			}
-			q.Execute(pointer.GrabCmd{Tag: canvasTag, ID: e.PointerID})
 
 		case pointer.Drag:
 			switch ed.mode {
 			case modeDragBlock:
-				ed.drag.X = world.X - ed.dragOff.X
-				ed.drag.Y = world.Y - ed.dragOff.Y
+				delta := world.Sub(ed.dragLast)
+				ed.dragLast = world
+				if ed.sel[ed.drag.ID] && len(ed.sel) > 0 {
+					// двигаем всё выделение на delta
+					for id := range ed.sel {
+						if blk := ed.doc.BlockByID(id); blk != nil {
+							blk.X += delta.X
+							blk.Y += delta.Y
+						}
+					}
+				} else {
+					ed.drag.X = world.X - ed.dragOff.X
+					ed.drag.Y = world.Y - ed.dragOff.Y
+				}
 			case modePan:
 				ed.cam.Pan = ed.panFrom.Pan.Add(scr.Sub(ed.panStart))
 			case modeLink:
@@ -180,6 +217,8 @@ func handleInput(q input.Source, ed *editor) {
 				if ep, hit := ed.doc.HitPin(world, pinHitR); hit && ep != ed.linkFrom {
 					ed.linkTo, ed.linkHover = ep, true
 				}
+			case modeBoxSelect:
+				ed.boxB = world
 			}
 
 		case pointer.Release, pointer.Cancel:
@@ -187,8 +226,13 @@ func handleInput(q input.Source, ed *editor) {
 			case modeDragBlock:
 				if b := ed.drag; b != nil {
 					// сброс: snap + разрешение перекрытий («рядом», §1)
-					ed.doc.MoveBlock(b.ID, geom.Snap(b.X, gridStep), geom.Snap(b.Y, gridStep))
-					PushOverlaps(ed.doc, b.ID)
+					if ed.sel[b.ID] {
+						snapSelection(ed.doc, ed.sel)
+						pushOverlapsSet(ed.doc, ed.sel)
+					} else {
+						ed.doc.MoveBlock(b.ID, geom.Snap(b.X, gridStep), geom.Snap(b.Y, gridStep))
+						PushOverlaps(ed.doc, b.ID)
+					}
 				}
 			case modeLink:
 				if ed.linkHover {
@@ -198,6 +242,8 @@ func handleInput(q input.Source, ed *editor) {
 						ed.msg = fmt.Sprintf("линк %v → %v уже существует", ed.linkFrom, ed.linkTo)
 					}
 				}
+			case modeBoxSelect:
+				ed.boxSelectFinish(world, e.Modifiers)
 			}
 			if ed.history.Finish(ed.doc) {
 				ed.dirty = true
@@ -216,6 +262,65 @@ func handleInput(q input.Source, ed *editor) {
 func PushOverlaps(d *core.Document, protectedID string) {
 	core.PushOverlaps(d, map[string]bool{protectedID: true}, gridStep, 8)
 }
+
+// --- Выделение --------------------------------------------------------------
+
+func selIDs(sel map[string]bool) []string {
+	ids := make([]string, 0, len(sel))
+	for id := range sel {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// snapSelection — snap к сетке всех выделенных блоков.
+func snapSelection(d *core.Document, sel map[string]bool) {
+	for id := range sel {
+		if b := d.BlockByID(id); b != nil {
+			b.X = geom.Snap(b.X, gridStep)
+			b.Y = geom.Snap(b.Y, gridStep)
+		}
+	}
+}
+
+// pushOverlapsSet — расталкивание с защитой всего выделения целиком.
+func pushOverlapsSet(d *core.Document, sel map[string]bool) {
+	prot := make(map[string]bool, len(sel))
+	for id := range sel {
+		prot[id] = true
+	}
+	core.PushOverlaps(d, prot, gridStep, 12)
+}
+
+// boxSelectFinish завершает рамку: заменяет/дополняет выделение пересечёнными
+// блоками; вырожденная рамка (клик по пустому) снимает выделение.
+func (ed *editor) boxSelectFinish(world geom.Vec, mods key.Modifiers) {
+	x0, x1 := min(ed.boxA.X, world.X), max(ed.boxA.X, world.X)
+	y0, y1 := min(ed.boxA.Y, world.Y), max(ed.boxA.Y, world.Y)
+	degenerate := (x1-x0) < 2 && (y1-y0) < 2
+	if degenerate {
+		ed.sel = nil
+		return
+	}
+	box := geom.NewRect(x0, y0, x1-x0, y1-y0)
+	if mods.Contain(key.ModShift) && ed.sel == nil {
+		ed.sel = map[string]bool{}
+	}
+	if !mods.Contain(key.ModShift) {
+		ed.sel = map[string]bool{}
+	}
+	for _, b := range ed.doc.Blocks {
+		if box.Overlaps(b.Rect()) {
+			ed.sel[b.ID] = true
+		}
+	}
+	if len(ed.sel) > 0 {
+		ed.msg = fmt.Sprintf("выбрано %d блоков", len(ed.sel))
+	}
+}
+
+// clearSelection — общая точка сброса (undo/redo/load сбивают ссылки).
+func (ed *editor) clearSelection() { ed.sel = nil }
 
 // --- Клавиатура -------------------------------------------------------------
 
@@ -239,12 +344,13 @@ func handleKeys(q input.Source, ed *editor) {
 // processKey — хоткеи. Ctrl — key.ModShortcut (на Windows Ctrl, на mac Cmd).
 func processKey(k key.Event, ed *editor) {
 	mod := k.Modifiers.Contain(key.ModShortcut)
+	shift := k.Modifiers.Contain(key.ModShift)
 	switch {
 	case mod && k.Name == "Z":
 		if ed.mode != modeFree {
 			return // во время драга не дёргаем (указатели ed.drag протухли бы)
 		}
-		if k.Modifiers.Contain(key.ModShift) {
+		if shift {
 			redoMark(ed)
 		} else {
 			undoMark(ed)
@@ -258,17 +364,71 @@ func processKey(k key.Event, ed *editor) {
 		saveDoc(ed)
 	case mod && k.Name == "O":
 		loadDoc(ed)
+	case mod && k.Name == "A":
+		if ed.mode == modeFree {
+			ed.sel = map[string]bool{}
+			for _, b := range ed.doc.Blocks {
+				ed.sel[b.ID] = true
+			}
+			ed.msg = fmt.Sprintf("выбраны все: %d блоков", len(ed.sel))
+		}
+	case !mod && k.Name == key.NameEscape:
+		ed.clearSelection()
+		ed.msg = "выделение снято"
 	case !mod && ed.mode == modeFree && len(k.Name) == 1 && k.Name[0] >= '1' && k.Name[0] <= '6':
 		addPinBlock(ed, int(k.Name[0]-'0'))
 	case !mod && ed.mode == modeFree &&
 		(k.Name == key.NameDeleteForward || k.Name == key.NameDeleteBackward):
 		deleteAtCursor(ed)
+	case !mod && ed.mode == modeFree && len(k.Name) == 1:
+		arrangeKey(string(k.Name), shift, ed)
 	}
+}
+
+// arrangeKey — упорядочивание выделенных (roadmap 1.4):
+// A/R — левые/правые края, T/B — верх/низ, H/V — центры, D — распределить
+// (Shift+D — по вертикали). Через Capture/Finish — полноценный undo-шаг.
+func arrangeKey(name string, shift bool, ed *editor) {
+	if len(ed.sel) < 2 {
+		ed.msg = "выделите ≥ 2 блока: рамкой на пустом, Shift+клик или Ctrl+A"
+		return
+	}
+	var op func(*core.Document, []string, float32)
+	human := ""
+	switch name {
+	case "A", "a":
+		op, human = core.AlignLefts, "align left"
+	case "R", "r":
+		op, human = core.AlignRights, "align right"
+	case "T", "t":
+		op, human = core.AlignTops, "align top"
+	case "B", "b":
+		op, human = core.AlignBottoms, "align bottom"
+	case "H", "h":
+		op, human = core.AlignCentersX, "center X"
+	case "V", "v":
+		op, human = core.AlignCentersY, "center Y"
+	case "D", "d":
+		if shift {
+			op, human = core.DistributeY, "distribute Y"
+		} else {
+			op, human = core.DistributeX, "distribute X"
+		}
+	default:
+		return
+	}
+	ed.history.Capture(ed.doc)
+	op(ed.doc, selIDs(ed.sel), gridStep)
+	if ed.history.Finish(ed.doc) {
+		ed.dirty = true
+	}
+	ed.msg = human
 }
 
 func undoMark(ed *editor) {
 	if ed.history.Undo(ed.doc) {
 		ed.dirty = true
+		ed.sel = nil
 		ed.msg = "undo"
 	} else {
 		ed.msg = "undo: истории нет"
@@ -278,6 +438,7 @@ func undoMark(ed *editor) {
 func redoMark(ed *editor) {
 	if ed.history.Redo(ed.doc) {
 		ed.dirty = true
+		ed.sel = nil
 		ed.msg = "redo"
 	} else {
 		ed.msg = "redo: нечего повторять"
@@ -350,6 +511,7 @@ func loadDoc(ed *editor) {
 	ed.doc = nd
 	ed.history.Reset(nd)
 	ed.dirty = false
+	ed.sel = nil
 	ed.msg = fmt.Sprintf("загружен %s (%d блоков)", ed.file, len(nd.Blocks))
 }
 
@@ -362,6 +524,7 @@ var (
 	colBord   = color.NRGBA{R: 0x2b, G: 0x4d, B: 0x91, A: 0xff}
 	colLink   = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0xff}
 	colJct    = color.NRGBA{R: 0xe0, G: 0x6a, B: 0x2a, A: 0xff} // junction-пин
+	colSel    = color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0xff} // рамка выделения
 	colFree   = color.NRGBA{R: 0xaa, G: 0xaa, B: 0xb2, A: 0xff} // свободный пин
 	colRubber = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0x80}
 	colText   = color.NRGBA{R: 0x55, G: 0x55, B: 0x60, A: 0xff}
@@ -375,7 +538,25 @@ func drawFrame(gtx layout.Context, ed *editor) {
 	drawBlocks(gtx, ed)
 	drawPins(gtx, ed)
 	drawRubber(gtx, ed)
+	drawSelBox(gtx, ed)
 	drawHUD(gtx, ed)
+}
+
+// drawSelBox — полупрозрачная рамка выделения во время натягивания.
+func drawSelBox(gtx layout.Context, ed *editor) {
+	if ed.mode != modeBoxSelect {
+		return
+	}
+	x0, x1 := min(ed.boxA.X, ed.boxB.X), max(ed.boxA.X, ed.boxB.X)
+	y0, y1 := min(ed.boxA.Y, ed.boxB.Y), max(ed.boxA.Y, ed.boxB.Y)
+	if (x1-x0) < 1 || (y1-y0) < 1 {
+		return
+	}
+	a := ed.cam.WorldToScreen(geom.Vec{x0, y0})
+	b := ed.cam.WorldToScreen(geom.Vec{x1, y1})
+	r := clip.Rect{Min: image.Pt(int(a.X), int(a.Y)), Max: image.Pt(int(b.X), int(b.Y))}
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x28}, r.Op())
+	stroke(gtx.Ops, r.Path(), 1.5, colLink)
 }
 
 func drawGrid(gtx layout.Context, ed *editor) {
@@ -465,7 +646,13 @@ func drawBlocks(gtx layout.Context, ed *editor) {
 		s := ed.cam.WorldToScreen(geom.Vec{b.X + b.W, b.Y + b.H})
 		r := clip.Rect{Min: image.Pt(int(p.X), int(p.Y)), Max: image.Pt(int(s.X), int(s.Y))}
 		paint.FillShape(gtx.Ops, colBlock, r.Op())
-		stroke(gtx.Ops, r.Path(), 1.5, colBord)
+		border := colBord
+		bw := float32(1.5)
+		if ed.sel[b.ID] { // выделение — оранжевая рамка
+			border = colSel
+			bw = 2.5
+		}
+		stroke(gtx.Ops, r.Path(), bw, border)
 
 		t := op.Offset(image.Pt(int(p.X)+10, int(p.Y)+6)).Push(gtx.Ops)
 		sz := 12 * ed.cam.Zoom
@@ -520,8 +707,8 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	}
 	groups := len(ed.doc.LinkGroups())
 	free := len(ed.doc.FreePins())
-	info := fmt.Sprintf("%s%s | undo:%d redo:%d | blocks %d | links %d | clusters %d | free pins %d | zoom %d%%",
-		ed.file, dirtyMark, undoN, redoN,
+	info := fmt.Sprintf("%s%s | undo:%d redo:%d | sel:%d | blocks %d | links %d | clusters %d | free pins %d | zoom %d%%",
+		ed.file, dirtyMark, undoN, redoN, len(ed.sel),
 		len(ed.doc.Blocks), len(ed.doc.Links), groups, free, int(ed.cam.Zoom*100))
 	if ed.mode == modeLink {
 		info += "   |   тянем от пина — отпусти на целевом пине"
@@ -531,8 +718,9 @@ func drawHUD(gtx layout.Context, ed *editor) {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
-	hint := "1..6: блок с N пинами   Del: удалить под курсором   тянуть с пина: линк   " +
-		"Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
+	hint := "1..6: блок с N пинами   Del: удалить   рамка на пустом: выделить   " +
+		"Shift+клик: +выделение   A/R/T/B: края   H/V: центры   D: распределить   " +
+		"Ctrl+Z/Y: undo/redo   Ctrl+A: все   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
 }
 
