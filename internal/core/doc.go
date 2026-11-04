@@ -63,11 +63,18 @@ type Document struct {
 	seq    int
 }
 
-// AddBlock добавляет блок; пустой ID автогенерируется (b1, b2, ...).
+// AddBlock добавляет блок; пустой ID автогенерируется (b1, b2, ...) —
+// пропуская коллизии с уже существующими (документ может содержать «bN»
+// с явными ID из файла).
 func (d *Document) AddBlock(b *Block) *Block {
 	if b.ID == "" {
-		d.seq++
-		b.ID = fmt.Sprintf("b%d", d.seq)
+		for {
+			d.seq++
+			b.ID = fmt.Sprintf("b%d", d.seq)
+			if d.BlockByID(b.ID) == nil {
+				break
+			}
+		}
 	}
 	if b.W == 0 {
 		b.W, b.H = 120, 64

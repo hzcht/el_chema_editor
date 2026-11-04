@@ -59,7 +59,8 @@ type editor struct {
 	history core.History
 	file    string // путь текущего файла (аргумент CLI или schematic.json)
 	dirty   bool
-	msg     string // статусное сообщение (save/load/undo/info)
+	msg     string     // статусное сообщение (save/load/undo/info)
+	clip    *core.Clip // буфер обмена (Ctrl+C/V)
 
 	mode mode
 
@@ -364,6 +365,19 @@ func processKey(k key.Event, ed *editor) {
 		saveDoc(ed)
 	case mod && k.Name == "O":
 		loadDoc(ed)
+	case mod && k.Name == "C":
+		if ed.mode == modeFree {
+			ed.clip = core.CopySelection(ed.doc, selIDs(ed.sel))
+			if len(ed.clip.Blocks) == 0 {
+				ed.msg = "буфер: нет выделения"
+			} else {
+				ed.msg = fmt.Sprintf("скопировано %d блоков", len(ed.clip.Blocks))
+			}
+		}
+	case mod && k.Name == "V":
+		if ed.mode == modeFree {
+			pasteClip(ed)
+		}
 	case mod && k.Name == "A":
 		if ed.mode == modeFree {
 			ed.sel = map[string]bool{}
@@ -464,21 +478,67 @@ func addPinBlock(ed *editor, n int) {
 	ed.msg = fmt.Sprintf("добавлен %s (пинов %d)", b.ID, n)
 }
 
-// deleteAtCursor — Del/Backspace удаляет блок под курсором вместе с его линками.
-func deleteAtCursor(ed *editor) {
-	world := ed.cam.ScreenToWorld(ed.cursor)
-	b := ed.doc.HitBlock(world)
-	if b == nil {
-		ed.msg = "под курсором нет блока"
+// pasteClip — вставка буфера под курсором: центр bbox бежит к курсору (снап),
+// вставленное становится выделением; через Capture/Finish — undo-шаг.
+func pasteClip(ed *editor) {
+	if ed.clip == nil || len(ed.clip.Blocks) == 0 {
+		ed.msg = "буфер пуст (Ctrl+C на выделении)"
 		return
 	}
-	id := b.ID
+	world := ed.cam.ScreenToWorld(ed.cursor)
+	var x0, y0, x1, y1 float32
+	for i, b := range ed.clip.Blocks {
+		if i == 0 || b.X < x0 {
+			x0 = b.X
+		}
+		if i == 0 || b.Y < y0 {
+			y0 = b.Y
+		}
+		if i == 0 || b.X+b.W > x1 {
+			x1 = b.X + b.W
+		}
+		if i == 0 || b.Y+b.H > y1 {
+			y1 = b.Y + b.H
+		}
+	}
+	center := geom.Vec{(x0 + x1) / 2, (y0 + y1) / 2}
+	dx := geom.Snap(world.X-center.X, gridStep)
+	dy := geom.Snap(world.Y-center.Y, gridStep)
+
 	ed.history.Capture(ed.doc)
-	ed.doc.RemoveBlock(id)
+	newIDs := ed.doc.Paste(ed.clip, dx, dy)
+	ed.sel = map[string]bool{}
+	for _, id := range newIDs {
+		ed.sel[id] = true
+	}
+	pushOverlapsSet(ed.doc, ed.sel)
 	if ed.history.Finish(ed.doc) {
 		ed.dirty = true
 	}
-	ed.msg = "удалён " + id
+	ed.msg = fmt.Sprintf("вставлено %d блоков", len(newIDs))
+}
+
+// deleteAtCursor — Del/Backspace: выделение целиком, иначе блок под курсором.
+func deleteAtCursor(ed *editor) {
+	ids := selIDs(ed.sel)
+	if len(ids) == 0 {
+		world := ed.cam.ScreenToWorld(ed.cursor)
+		b := ed.doc.HitBlock(world)
+		if b == nil {
+			ed.msg = "под курсором нет блока"
+			return
+		}
+		ids = []string{b.ID}
+	}
+	ed.history.Capture(ed.doc)
+	for _, id := range ids {
+		ed.doc.RemoveBlock(id)
+	}
+	if ed.history.Finish(ed.doc) {
+		ed.dirty = true
+	}
+	ed.sel = nil
+	ed.msg = fmt.Sprintf("удалено блоков: %d", len(ids))
 }
 
 // --- Файлы ------------------------------------------------------------------
@@ -718,9 +778,9 @@ func drawHUD(gtx layout.Context, ed *editor) {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
-	hint := "1..6: блок с N пинами   Del: удалить   рамка на пустом: выделить   " +
-		"Shift+клик: +выделение   A/R/T/B: края   H/V: центры   D: распределить   " +
-		"Ctrl+Z/Y: undo/redo   Ctrl+A: все   Ctrl+S/O: файл"
+	hint := "1..6: блок с N пинами   Del: удалить   Ctrl+C/V: копить/вставить   " +
+		"рамка на пустом: выделить   Shift+клик: +выделение   A/R/T/B: края   " +
+		"H/V: центры   D: распределить   Ctrl+Z/Y: undo/redo   Ctrl+A: все   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
 }
 
