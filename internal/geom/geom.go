@@ -75,8 +75,11 @@ func Opposite(a, b Side) bool {
 // --- Камера ----------------------------------------------------------------
 
 const (
-	ZoomMin = float32(0.1)
-	ZoomMax = float32(8.0)
+	// Границы зума в px/мм: при pxPerMM=4 это 10%…800% (§13.3).
+	// Старые 0.1–8 «px-домена» давали 2.5%…200% — сцена схлопывалась в точку
+	// и «уезжала» (отзыв от прогона).
+	ZoomMin = float32(0.4)
+	ZoomMax = float32(32.0)
 )
 
 // Camera: screen = world*zoom + pan.
@@ -94,6 +97,9 @@ func (c *Camera) ZoomAt(screen Vec, factor float32) {
 	c.Zoom = clampZoom(c.Zoom * factor)
 	c.Pan = screen.Sub(world.Scale(c.Zoom))
 }
+
+// ClampZoom — общедоступный кламп (приложение им же ограничивает fit).
+func ClampZoom(z float32) float32 { return clampZoom(z) }
 
 func clampZoom(z float32) float32 {
 	if z < ZoomMin {

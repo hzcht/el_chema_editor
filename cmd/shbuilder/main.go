@@ -64,6 +64,8 @@ type editor struct {
 
 	grid    float32 // шаг координатной сетки, мм
 	gridIdx int     // индекс в gridChoices (для цикла по G)
+	viewW   float32 // размер окна в px (обновляется в drawFrame)
+	viewH   float32
 
 	history core.History
 	file    string // путь текущего файла (аргумент CLI или schematic.json)
@@ -198,7 +200,8 @@ func handleInput(q input.Source, ed *editor) {
 				}
 				q.Execute(pointer.GrabCmd{Tag: canvasTag, ID: e.PointerID})
 
-			case e.Buttons.Contain(pointer.ButtonSecondary):
+			case e.Buttons.Contain(pointer.ButtonSecondary) ||
+				e.Buttons.Contain(pointer.ButtonTertiary): // ПКМ/СКМ — панорама
 				ed.mode = modePan
 				ed.panStart = scr
 				ed.panFrom = ed.cam
@@ -265,7 +268,9 @@ func handleInput(q input.Source, ed *editor) {
 			ed.linkHover = false
 
 		case pointer.Scroll:
-			ed.cam.ZoomAt(scr, float32(math.Pow(1.1, float64(-e.Scroll.Y))))
+			if ed.mode == modeFree { // в драге зум только путает координаты
+				ed.cam.ZoomAt(scr, float32(math.Pow(1.1, float64(-e.Scroll.Y))))
+			}
 		}
 	}
 }
@@ -398,6 +403,25 @@ func processKey(k key.Event, ed *editor) {
 	case !mod && k.Name == key.NameEscape:
 		ed.clearSelection()
 		ed.msg = "выделение снято"
+	case !mod && ed.mode == modeFree && k.Name == key.NameHome:
+		fitToWindow(ed) // вся схема в окно
+	case !mod && ed.mode == modeFree &&
+		(k.Name == key.NameLeftArrow || k.Name == key.NameRightArrow ||
+			k.Name == key.NameUpArrow || k.Name == key.NameDownArrow):
+		s := ed.grid * ed.cam.Zoom // шаг стрелками = шаг сетки
+		if shift {
+			s *= 5
+		}
+		switch k.Name {
+		case key.NameLeftArrow:
+			ed.cam.Pan.X += s
+		case key.NameRightArrow:
+			ed.cam.Pan.X -= s
+		case key.NameUpArrow:
+			ed.cam.Pan.Y += s
+		case key.NameDownArrow:
+			ed.cam.Pan.Y -= s
+		}
 	case !mod && ed.mode == modeFree && len(k.Name) == 1 && k.Name[0] >= '1' && k.Name[0] <= '6':
 		addPinBlock(ed, int(k.Name[0]-'0'))
 	case !mod && ed.mode == modeFree &&
@@ -605,6 +629,8 @@ var (
 )
 
 func drawFrame(gtx layout.Context, ed *editor) {
+	ed.viewW = float32(gtx.Constraints.Max.X)
+	ed.viewH = float32(gtx.Constraints.Max.Y)
 	paint.FillShape(gtx.Ops, colBG,
 		clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Max.Y)}.Op())
 	drawGrid(gtx, ed)
@@ -613,7 +639,89 @@ func drawFrame(gtx layout.Context, ed *editor) {
 	drawPins(gtx, ed)
 	drawRubber(gtx, ed)
 	drawSelBox(gtx, ed)
+	drawMiniMap(gtx, ed)
 	drawHUD(gtx, ed)
+}
+
+// docBBox — габарит всех блоков с полями pad (мм); пустой документ — условный мир.
+func docBBox(d *core.Document, pad float32) geom.Rect {
+	if len(d.Blocks) == 0 {
+		return geom.NewRect(-pad, -pad, 150+2*pad, 100+2*pad)
+	}
+	r := d.Blocks[0].Rect()
+	for _, b := range d.Blocks[1:] {
+		br := b.Rect()
+		r.Min.X, r.Min.Y = minf(r.Min.X, br.Min.X), minf(r.Min.Y, br.Min.Y)
+		r.Max.X, r.Max.Y = maxf(r.Max.X, br.Max.X), maxf(r.Max.Y, br.Max.Y)
+	}
+	return geom.Rect{
+		Min: geom.Vec{X: r.Min.X - pad, Y: r.Min.Y - pad},
+		Max: geom.Vec{X: r.Max.X + pad, Y: r.Max.Y + pad},
+	}
+}
+
+// fitToWindow — «Home»: вся схема целиком в окне с полями.
+func fitToWindow(ed *editor) {
+	if ed.viewW == 0 || ed.viewH == 0 {
+		return
+	}
+	r := docBBox(ed.doc, 20)
+	w, h := maxf(r.Size().X, 1), maxf(r.Size().Y, 1)
+	const margin = 48.0 // px со всех сторон
+	z := geom.ClampZoom(minf((ed.viewW-2*margin)/w, (ed.viewH-2*margin)/h))
+	cx, cy := (r.Min.X+r.Max.X)/2, (r.Min.Y+r.Max.Y)/2
+	ed.cam = geom.Camera{
+		Zoom: z,
+		Pan:  geom.Vec{X: ed.viewW/2 - cx*z, Y: ed.viewH/2 - cy*z},
+	}
+	ed.msg = "вся схема в окне"
+}
+
+// drawMiniMap — уголок-ориентир: уменьшенная схема и рамка видимой области
+// (вместо скроллбаров: пан — ПКМ/СКМ, Home — вся схема, стрелки — листать).
+func drawMiniMap(gtx layout.Context, ed *editor) {
+	if ed.viewW == 0 || len(ed.doc.Blocks) == 0 {
+		return
+	}
+	const (
+		mw = float32(150)
+		mh = float32(96)
+		mg = float32(16)
+	)
+	box := docBBox(ed.doc, 10)
+	v0 := ed.cam.ScreenToWorld(geom.Vec{X: 0, Y: 0})
+	v1 := ed.cam.ScreenToWorld(geom.Vec{X: ed.viewW, Y: ed.viewH})
+	box.Min.X = minf(box.Min.X, v0.X)
+	box.Min.Y = minf(box.Min.Y, v0.Y)
+	box.Max.X = maxf(box.Max.X, v1.X)
+	box.Max.Y = maxf(box.Max.Y, v1.Y)
+	ww, wh := maxf(box.Size().X, 1), maxf(box.Size().Y, 1)
+	sc := minf(mw/ww, mh/wh)
+	ox, oy := ed.viewW-mg-mw, ed.viewH-mg-mh-20 // над строкой подсказки
+	toMini := func(w geom.Vec) geom.Vec {
+		return geom.Vec{X: ox + (w.X-box.Min.X)*sc, Y: oy + (w.Y-box.Min.Y)*sc}
+	}
+	fillRect(gtx.Ops, image.Rectangle{
+		Min: image.Pt(int(ox-3), int(oy-3)),
+		Max: image.Pt(int(ox+mw+3), int(oy+mh+3)),
+	}, color.NRGBA{R: 0x14, G: 0x18, B: 0x20, A: 0xc0})
+	for _, b := range ed.doc.Blocks {
+		a := toMini(geom.Vec{X: b.X, Y: b.Y})
+		s := toMini(geom.Vec{X: b.X + b.W, Y: b.Y + b.H})
+		if s.X-a.X < 2 {
+			s.X = a.X + 2 // не теряем мелкие блоки
+		}
+		if s.Y-a.Y < 2 {
+			s.Y = a.Y + 2
+		}
+		fillRect(gtx.Ops, image.Rectangle{
+			Min: image.Pt(int(a.X), int(a.Y)),
+			Max: image.Pt(int(s.X), int(s.Y)),
+		}, colBlock)
+	}
+	va, vb := toMini(v0), toMini(v1) // рамка видимой области
+	r := clip.Rect{Min: image.Pt(int(va.X), int(va.Y)), Max: image.Pt(int(vb.X), int(vb.Y))}
+	stroke(gtx.Ops, r.Path(), 1.5, colSel)
 }
 
 // drawSelBox — полупрозрачная рамка выделения во время натягивания.
@@ -634,19 +742,23 @@ func drawSelBox(gtx layout.Context, ed *editor) {
 }
 
 func drawGrid(gtx layout.Context, ed *editor) {
+	step := ed.grid
+	for step*ed.cam.Zoom < 3 { // линия реже 3 px — разрежаем шаг ×2 (5→10→20…)
+		step *= 2
+	}
 	w, h := float32(gtx.Constraints.Max.X), float32(gtx.Constraints.Max.Y)
 	minW := ed.cam.ScreenToWorld(geom.Vec{X: 0, Y: 0})
 	maxW := ed.cam.ScreenToWorld(geom.Vec{X: w, Y: h})
 	minWx, minWy, maxWx, maxWy := minW.X, minW.Y, maxW.X, maxW.Y
 
-	startX := geom.Snap(max(minWx, 0), ed.grid)
-	for x := startX; x <= min(maxWx, worldMax); x += ed.grid {
+	startX := geom.Snap(max(minWx, 0), step)
+	for x := startX; x <= min(maxWx, worldMax); x += step {
 		p1 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: max(minWy, 0)})
 		p2 := ed.cam.WorldToScreen(geom.Vec{X: x, Y: min(maxWy, worldMax)})
 		drawSeg(gtx.Ops, p1, p2, 1, colGrid)
 	}
-	startY := geom.Snap(max(minWy, 0), ed.grid)
-	for y := startY; y <= min(maxWy, worldMax); y += ed.grid {
+	startY := geom.Snap(max(minWy, 0), step)
+	for y := startY; y <= min(maxWy, worldMax); y += step {
 		p1 := ed.cam.WorldToScreen(geom.Vec{X: max(minWx, 0), Y: y})
 		p2 := ed.cam.WorldToScreen(geom.Vec{X: min(maxWx, worldMax), Y: y})
 		drawSeg(gtx.Ops, p1, p2, 1, colGrid)
@@ -912,9 +1024,9 @@ func drawHUD(gtx layout.Context, ed *editor) {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
-	hint := "1..6: блок с N пинами   G: шаг сетки   Del: удалить   Ctrl+C/V: копировать/вставить   " +
-		"рамка на пустом: выделить   Shift+клик: +выделение   A/R/T/B: края   " +
-		"H/V: центры   D: распределить   Ctrl+Z/Y: undo/redo   Ctrl+A: все   Ctrl+S/O: файл"
+	hint := "колесо: зум к курсору   ПКМ/СКМ: панорама   Home: вся схема   ←↑↓→: листать   " +
+		"1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
+		"рамка/Shift+клик: выделить   A/R/T/B H/V D: выровнять   Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
 }
 
