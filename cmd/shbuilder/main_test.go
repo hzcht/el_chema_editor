@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"gioui.org/f32"
+	"gioui.org/io/event"
+	"gioui.org/io/input"
+	"gioui.org/io/key"
 	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
@@ -63,4 +66,38 @@ func abs2f(v float32) float32 {
 		return -v
 	}
 	return v
+}
+
+// TestKeyDeliveryHeadless — без окна повторяет цепочку run(): input-area
+// (event.Op), FocusCmd, фильтры handleKeys, кадр, нажатия между кадрами,
+// снова handleKeys → processKey. Ловит обе ловушки, из-за которых
+// «клавиши не реагировали»:
+//  1. keyQueue.Frame() снимает фокус в конце кадра, если для тега нет
+//     event.Op + key.FocusFilter (focusable/visible) — события отбрасываются;
+//  2. фильтр с Optional:0 не пропускает клавиши с модификатором (Ctrl+…).
+func TestKeyDeliveryHeadless(t *testing.T) {
+	var r input.Router
+	ed := &editor{cam: geom.Camera{Zoom: pxPerMM * 3}, grid: 10, gridIdx: 1}
+
+	// кадр 1 — как в run()
+	ops := new(op.Ops)
+	event.Op(ops, keyTag)
+	r.Source().Execute(key.FocusCmd{Tag: keyTag})
+	handleKeys(r.Source(), ed) // регистрация фильтров (событий ещё нет)
+	r.Frame(ops)               // здесь старый код терял фокус
+
+	// между кадрами приходят нажатия: простое «0» и Ctrl+G
+	r.Queue(key.Event{Name: "0", State: key.Press})
+	r.Queue(key.Event{Name: "G", State: key.Press, Modifiers: key.ModCtrl})
+
+	// кадр 2: handleKeys раздаёт события в processKey
+	handleKeys(r.Source(), ed)
+
+	if ed.cam.Zoom != pxPerMM {
+		t.Fatalf("простая клавиша «0» не дошла до processKey: зум %v, ожидали %v",
+			ed.cam.Zoom, pxPerMM)
+	}
+	if ed.lastKey != "G" {
+		t.Fatalf("Ctrl+G не дошёл (фильтр отбросил модификатор): lastKey=%q", ed.lastKey)
+	}
 }

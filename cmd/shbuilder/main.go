@@ -66,6 +66,7 @@ type editor struct {
 	gridIdx int     // индекс в gridChoices (для цикла по G)
 	viewW   float32 // размер окна в px (обновляется в drawFrame)
 	viewH   float32
+	lastKey string // последняя нажатая клавиша (отладка клавиатуры)
 
 	history core.History
 	file    string // путь текущего файла (аргумент CLI или schematic.json)
@@ -368,10 +369,22 @@ func (ed *editor) clearSelection() { ed.sel = nil }
 
 var keyTag = new(struct{})
 
+// keyFilter — catch-all по клавишам в фокусе канвы. Optional обязан
+// перечислять ВСЕ модификаторы: keyFilterMatch отбрасывает событие, если
+// e.Modifiers&^(Required|Optional) != 0 — без этого любое нажатие с зажатым
+// Ctrl/Shift/Alt (Ctrl+Z, Shift+стрелки и т.п.) до handleKeys не доходит.
+var keyFilter = key.Filter{
+	Focus:    keyTag,
+	Optional: key.ModShift | key.ModCtrl | key.ModCommand | key.ModAlt | key.ModSuper,
+}
+
 // handleKeys потребляет key-события текущего кадра.
 func handleKeys(q input.Source, ed *editor) {
 	for {
-		ke, ok := q.Event(key.Filter{Focus: keyTag}) // пустое Name — все клавиши
+		// FocusFilter — не для событий, а ради жизненного цикла фокуса:
+		// без него keyQueue.Frame() в конце каждого кадра снимает фокус
+		// (нет handler'а с filter.focusable) и клавиши перестают доходить.
+		ke, ok := q.Event(keyFilter, key.FocusFilter{Target: keyTag}) // пустое Name — все клавиши
 		if !ok {
 			break
 		}
@@ -385,6 +398,7 @@ func handleKeys(q input.Source, ed *editor) {
 
 // processKey — хоткеи. Ctrl — key.ModShortcut (на Windows Ctrl, на mac Cmd).
 func processKey(k key.Event, ed *editor) {
+	ed.lastKey = string(k.Name) // отладка: фиксируем каждую нажатую клавишу
 	mod := k.Modifiers.Contain(key.ModShortcut)
 	shift := k.Modifiers.Contain(key.ModShift)
 	switch {
@@ -1094,6 +1108,9 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	if ed.msg != "" {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
+	if ed.lastKey != "" {
+		drawHUDLine(gtx, ed.th, "клав: "+ed.lastKey, 32, colText)
+	}
 	h := float32(gtx.Constraints.Max.Y)
 	hint := "колесо: зум к курсору (5%)   0/=/-: зум 100% / + / –   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
 		"1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
@@ -1143,6 +1160,10 @@ func run(w *app.Window) error {
 			ops := new(op.Ops)
 			gtx := app.NewContext(ops, e)
 			event.Op(gtx.Ops, canvasTag)
+			// Отдельная input-area для клавиатуры: без event.Op для keyTag
+			// у его handler'а не будет visible, и keyQueue.Frame() снимет
+			// фокус в конце кадра — клавиши «не реагируют».
+			event.Op(gtx.Ops, keyTag)
 			e.Source.Execute(key.FocusCmd{Tag: keyTag}) // канва держит фокус клавиатуры
 			handleInput(e.Source, ed)
 			handleKeys(e.Source, ed)
