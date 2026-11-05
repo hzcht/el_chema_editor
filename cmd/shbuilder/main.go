@@ -283,7 +283,20 @@ func handleInput(q input.Source, ed *editor) {
 
 		case pointer.Scroll:
 			if ed.mode == modeFree { // в драге зум только путает координаты
-				ed.cam.ZoomAt(scr, float32(math.Pow(1.05, float64(-e.Scroll.Y)))) // шаг 5%, мягче 10%
+				// Скролл на Windows может присылать большие значения Scroll.Y (±120 за тик).
+				// Берём только знак — один тик = 5% зума, независимо от размера дельты.
+				var factor float32
+				switch {
+				case e.Scroll.Y < 0: // колесо на себя — зум в
+					factor = 1.05
+				case e.Scroll.Y > 0: // колесо от себя — зум вы
+					factor = 1.0 / 1.05
+				default:
+					factor = 1.0
+				}
+				if factor != 1.0 {
+					ed.cam.ZoomAt(scr, factor)
+				}
 			}
 		}
 	}
@@ -422,6 +435,12 @@ func processKey(k key.Event, ed *editor) {
 	case !mod && ed.mode == modeFree && k.Name == "0":
 		ed.cam.Zoom = pxPerMM // сброс зума к 100%
 		ed.msg = "зум 100%"
+	case !mod && ed.mode == modeFree && k.Name == "=":
+		ed.cam.Zoom = geom.ClampZoom(ed.cam.Zoom * 1.1) // зум +
+		ed.msg = fmt.Sprintf("зум %d%%", int(ed.cam.Zoom/pxPerMM*100))
+	case !mod && ed.mode == modeFree && k.Name == "-":
+		ed.cam.Zoom = geom.ClampZoom(ed.cam.Zoom / 1.1) // зум –
+		ed.msg = fmt.Sprintf("зум %d%%", int(ed.cam.Zoom/pxPerMM*100))
 	case !mod && ed.mode == modeFree &&
 		(k.Name == key.NameLeftArrow || k.Name == key.NameRightArrow ||
 			k.Name == key.NameUpArrow || k.Name == key.NameDownArrow):
@@ -1076,7 +1095,7 @@ func drawHUD(gtx layout.Context, ed *editor) {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
-	hint := "колесо: зум к курсору (5%)   0: зум 100%   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
+	hint := "колесо: зум к курсору (5%)   0/=/-: зум 100% / + / –   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
 		"1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
 		"рамка/Shift+клик: выделить   A/R/T/B H/V D: выровнять   Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
