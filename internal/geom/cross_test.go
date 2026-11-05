@@ -115,7 +115,7 @@ func TestSegCrossRectMiss(t *testing.T) {
 // RouteAvoid: прямой путь сквозь блок обходится (сверху или снизу — оба валидны).
 func TestRouteAvoidBelow(t *testing.T) {
 	obs := []Rect{{Min: Vec{X: 40, Y: 40}, Max: Vec{X: 60, Y: 60}}}
-	route := RouteAvoid(Vec{X: 0, Y: 50}, SideRight, Vec{X: 100, Y: 50}, SideLeft, 2, obs)
+	route := RouteAvoid(Vec{X: 0, Y: 50}, SideRight, Vec{X: 100, Y: 50}, SideLeft, 2, obs, nil)
 	// ни один горизонтальный сегмент не должен проходить через внутренность блока
 	for i := 1; i < len(route); i++ {
 		if nearf(route[i-1].Y, route[i].Y) {
@@ -136,7 +136,7 @@ func TestRouteAvoidBelow(t *testing.T) {
 // RouteAvoid: вертикальный путь сквозь блок обходится слева или справа.
 func TestRouteAvoidSide(t *testing.T) {
 	obs := []Rect{{Min: Vec{X: 40, Y: 40}, Max: Vec{X: 60, Y: 60}}}
-	route := RouteAvoid(Vec{X: 50, Y: 0}, SideBottom, Vec{X: 50, Y: 100}, SideTop, 2, obs)
+	route := RouteAvoid(Vec{X: 50, Y: 0}, SideBottom, Vec{X: 50, Y: 100}, SideTop, 2, obs, nil)
 	for i := 1; i < len(route); i++ {
 		if nearf(route[i-1].X, route[i].X) {
 			x := route[i-1].X
@@ -155,7 +155,7 @@ func TestRouteAvoidSide(t *testing.T) {
 
 // RouteAvoid: без препятствий — как обычный Route.
 func TestRouteAvoidNone(t *testing.T) {
-	route := RouteAvoid(Vec{X: 0, Y: 0}, SideRight, Vec{X: 100, Y: 100}, SideLeft, 2, nil)
+	route := RouteAvoid(Vec{X: 0, Y: 0}, SideRight, Vec{X: 100, Y: 100}, SideLeft, 2, nil, nil)
 	if len(route) < 2 {
 		t.Fatalf("пустой маршрут: %v", route)
 	}
@@ -191,7 +191,7 @@ func TestRouteAvoidKeepsGap(t *testing.T) {
 		{"пролет в 2 мм от блока", Vec{X: 0, Y: 38}, Vec{X: 120, Y: 38}, SideRight, SideLeft},
 	}
 	for _, c := range cases {
-		route := RouteAvoid(c.p1, c.s1, c.p2, c.s2, out, obs)
+		route := RouteAvoid(c.p1, c.s1, c.p2, c.s2, out, obs, nil)
 		for i := 1; i < len(route); i++ {
 			d := segRectDist(route[i-1], route[i], obs[0])
 			if d < out-1e-3 {

@@ -68,6 +68,61 @@ func abs2f(v float32) float32 {
 	return v
 }
 
+// segInteriorCross — попадает ли осевой отрезок a-b во внутренность r
+// (с отступом pad от кромки). Точки ровно на кромке (штыри пинов, подход
+// к пину) не считаются пересечением. Метод слэбов по обеим осям.
+func segInteriorCross(a, b geom.Vec, r geom.Rect, pad float32) bool {
+	minX, maxX := r.Min.X+pad, r.Max.X-pad
+	minY, maxY := r.Min.Y+pad, r.Max.Y-pad
+	t0, t1 := float32(0), float32(1)
+	slab := func(p, q, lo, hi float32) bool {
+		d := q - p
+		if d == 0 {
+			return p >= lo && p <= hi
+		}
+		tn, tf := (lo-p)/d, (hi-p)/d
+		if tn > tf {
+			tn, tf = tf, tn
+		}
+		if tn > t0 {
+			t0 = tn
+		}
+		if tf < t1 {
+			t1 = tf
+		}
+		return t0 <= t1
+	}
+	return slab(a.X, b.X, minX, maxX) && slab(a.Y, b.Y, minY, maxY)
+}
+
+// TestDemoLinksDontCutBlocks — маршрут каждого линка демо-сцены не режет
+// внутренность ни одного блока, ВКЛЮЧАЯ блоки его собственных концов.
+// Ловит регресс «A.0→B.0 шёл сквозь блок A по линии пинов, сливаясь
+// с правым коннектором A.1» (блоки концов ошибочно исключались из
+// препятствий).
+func TestDemoLinksDontCutBlocks(t *testing.T) {
+	d := demoScene()
+	const pad float32 = 1e-3 // кромка/штырь пина — не пересечение
+	for _, l := range d.Links {
+		obs, self := linkObs(d, l.From, l.To) // production-путь: как в drawLinks
+		p1, s1, ok1 := d.PinPos(l.From)
+		p2, s2, ok2 := d.PinPos(l.To)
+		if !ok1 || !ok2 {
+			t.Fatalf("пины не найдены: %+v → %+v", l.From, l.To)
+		}
+		route := geom.RouteAvoid(p1, s1, p2, s2, outset, obs, self)
+		all := append(append(make([]geom.Rect, 0, len(obs)+len(self)), obs...), self...)
+		for i := 1; i < len(route); i++ {
+			for _, r := range all {
+				if segInteriorCross(route[i-1], route[i], r, pad) {
+					t.Errorf("линк %v→%v: сегмент %v→%v режет блок (внутренность %v)",
+						l.From, l.To, route[i-1], route[i], r)
+				}
+			}
+		}
+	}
+}
+
 // TestKeyDeliveryHeadless — без окна повторяет цепочку run(): input-area
 // (event.Op), FocusCmd, фильтры handleKeys, кадр, нажатия между кадрами,
 // снова handleKeys → processKey. Ловит обе ловушки, из-за которых

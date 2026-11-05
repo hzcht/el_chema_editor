@@ -846,16 +846,8 @@ func drawLinks(gtx layout.Context, ed *editor) {
 			routes = append(routes, nil)
 			continue
 		}
-		// все блоки как препятствия (кроме блоков концов — RouteAvoid не childhood-блоки,
-		// так как маршрут начинается/кончается на их границах)
-		obs := make([]geom.Rect, 0, len(ed.doc.Blocks))
-		for _, b := range ed.doc.Blocks {
-			if b.ID == l.From.BlockID || b.ID == l.To.BlockID {
-				continue
-			}
-			obs = append(obs, b.Rect())
-		}
-		r := geom.RouteAvoid(p1, s1, p2, s2, outset, obs)
+		obs, self := linkObs(ed.doc, l.From, l.To)
+		r := geom.RouteAvoid(p1, s1, p2, s2, outset, obs, self)
 		segs := make([]seg, 0, len(r)-1)
 		for i := 1; i < len(r); i++ {
 			segs = append(segs, seg{a: r[i-1], b: r[i]})
@@ -940,15 +932,8 @@ func drawRubber(gtx layout.Context, ed *editor) {
 	var pts []geom.Vec
 	if ed.linkHover {
 		p2, s2, _ := ed.doc.PinPos(ed.linkTo)
-		// все блоки как препятствия, кроме блоков концов
-		obs := make([]geom.Rect, 0, len(ed.doc.Blocks))
-		for _, b := range ed.doc.Blocks {
-			if b.ID == ed.linkFrom.BlockID || b.ID == ed.linkTo.BlockID {
-				continue
-			}
-			obs = append(obs, b.Rect())
-		}
-		pts = geom.RouteAvoid(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset, obs)
+		obs, self := linkObs(ed.doc, ed.linkFrom, ed.linkTo)
+		pts = geom.RouteAvoid(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset, obs, self)
 	} else {
 		pts = rubberRoute(ed.doc, ed.linkFrom, ed.cam.ScreenToWorld(ed.cursor), outset)
 	}
@@ -967,6 +952,25 @@ func drawRubber(gtx layout.Context, ed *editor) {
 func sideOf(d *core.Document, ep core.Endpoint) geom.Side {
 	_, s, _ := d.PinPos(ep)
 	return s
+}
+
+// linkObs — препятствия для маршрута линка. Чужие блоки (obstacles) обходят
+// с зоной запрета «блок + зазор»; блоки собственных концов (self) — только
+// без разрезания внутренности: пин лежит на кромке блока, и зона вокруг
+// него сделала бы каждый подход к пину «нарушением» — обход зацикливался
+// петлёй («флажок» у блока B в демо). Штырь-заглушка у пина лежит на
+// кромке и не детектится, дальше маршрут идёт только вокруг. Раньше блоки
+// концов исключались вовсе, и линк A.0→B.0 резал собственный блок A.
+func linkObs(d *core.Document, from, to core.Endpoint) (obstacles, self []geom.Rect) {
+	for _, b := range d.Blocks {
+		r := b.Rect()
+		if b.ID == from.BlockID || b.ID == to.BlockID {
+			self = append(self, r)
+		} else {
+			obstacles = append(obstacles, r)
+		}
+	}
+	return obstacles, self
 }
 
 // rubberRoute — предпросмотр резинки от пина до курсора: выход вдоль нормали

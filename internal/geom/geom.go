@@ -325,7 +325,13 @@ func SegCrossRect(a, b Vec, r Rect) (Vec, bool) {
 // Вокруг каждого блока — зона запрета «блок + зазор out»: маршрут не
 // заходит в неё, поэтому провод идёт с зазором и не прилипает к кромке
 // обтекаемого блока. Начинает с Route() и итеративно достраивает обходы.
-func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles []Rect) []Vec {
+//
+// self — блоки, к чьим пинам подходит маршрут (его собственные концы).
+// Для них зона запрета НЕ действует: пин лежит на кромке блока, и зона
+// вокруг него сделала бы любой подход «нарушением» — обход зацикливался
+// бы петлёй вокруг пина («флажок»). Достаточно не резать внутренность
+// блока — штырь-заглушка у пина лежит на кромке и не детектится.
+func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self []Rect) []Vec {
 	expanded := make([]Rect, len(obstacles))
 	for i, o := range obstacles {
 		expanded[i] = Rect{
@@ -355,6 +361,15 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles []Rect)
 					fixed = true
 					break
 				}
+			}
+			// свои блоки: только без разрезания внутренности (без зоны)
+			for k := 0; k < len(self) && !fixed; k++ {
+				pt, ok := SegCrossRect(a, b, self[k])
+				if !ok || near(pt, b) {
+					continue
+				}
+				route = detourAround(route, i-1, self[k], out)
+				fixed = true
 			}
 		}
 		if !fixed {
