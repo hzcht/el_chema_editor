@@ -283,7 +283,7 @@ func handleInput(q input.Source, ed *editor) {
 
 		case pointer.Scroll:
 			if ed.mode == modeFree { // в драге зум только путает координаты
-				ed.cam.ZoomAt(scr, float32(math.Pow(1.1, float64(-e.Scroll.Y))))
+				ed.cam.ZoomAt(scr, float32(math.Pow(1.05, float64(-e.Scroll.Y)))) // шаг 5%, мягче 10%
 			}
 		}
 	}
@@ -419,6 +419,9 @@ func processKey(k key.Event, ed *editor) {
 		ed.msg = "выделение снято"
 	case !mod && ed.mode == modeFree && k.Name == key.NameHome:
 		fitToWindow(ed) // вся схема в окно
+	case !mod && ed.mode == modeFree && k.Name == "0":
+		ed.cam.Zoom = pxPerMM // сброс зума к 100%
+		ed.msg = "зум 100%"
 	case !mod && ed.mode == modeFree &&
 		(k.Name == key.NameLeftArrow || k.Name == key.NameRightArrow ||
 			k.Name == key.NameUpArrow || k.Name == key.NameDownArrow):
@@ -1061,10 +1064,10 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	}
 	groups := len(ed.doc.LinkGroups())
 	free := len(ed.doc.FreePins())
-	info := fmt.Sprintf("%s%s | undo:%d redo:%d | sel:%d | блоки %d | линки %d | cluster %d | своб.пины %d | сетка %v мм | зум %d%%",
-		ed.file, dirtyMark, undoN, redoN, len(ed.sel),
-		len(ed.doc.Blocks), len(ed.doc.Links), groups, free,
-		ed.grid, int(ed.cam.Zoom/pxPerMM*100))
+	info := fmt.Sprintf("зум %d%% | сетка %v мм | %s%s | undo:%d redo:%d | sel:%d | блоки %d | линки %d | cluster %d | своб.пины %d",
+		int(ed.cam.Zoom/pxPerMM*100),
+		ed.grid, ed.file, dirtyMark, undoN, redoN, len(ed.sel),
+		len(ed.doc.Blocks), len(ed.doc.Links), groups, free)
 	if ed.mode == modeLink {
 		info += "   |   тянем от пина — отпусти на целевом пине"
 	}
@@ -1073,7 +1076,7 @@ func drawHUD(gtx layout.Context, ed *editor) {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
-	hint := "колесо: зум к курсору   ПКМ/СКМ: панорама   Home: вся схема   ←↑↓→: листать   " +
+	hint := "колесо: зум к курсору (5%)   0: зум 100%   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
 		"1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
 		"рамка/Shift+клик: выделить   A/R/T/B H/V D: выровнять   Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
