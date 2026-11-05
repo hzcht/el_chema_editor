@@ -56,6 +56,14 @@ Gotchas (cost debugging time once — do not rediscover):
   wire crossings draw as hop arcs (later link hops over earlier), `Ctrl+Z/Y` undo/redo,
   `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press /
   Finish-on-release (idle clicks don't pollute history — `core.History`).
+- **Gio keyboard focus (v0.10.3) is triple-deferred — drop any one and keys die silently**:
+  every frame needs (1) `event.Op(gtx.Ops, keyTag)` (gives the handler `visible`),
+  (2) `key.FocusFilter{Target: keyTag}` inside the `q.Event(...)` call (gives `focusable`),
+  (3) `key.FocusCmd{Tag: keyTag}`. Without (1)+(2), `keyQueue.Frame` clears focus at the
+  END of every frame → key events are dropped between frames and nothing reacts.
+  Also `key.Filter{}` needs `Optional:` listing every modifier (Shift/Ctrl/Alt/Command/Super),
+  otherwise any modified keystroke fails `keyFilterMatch`. Headless regression test:
+  `TestKeyDeliveryHeadless` (cmd/shbuilder/main_test.go).
 - **World unit = 1 mm** (ADR-0006): zoom 100% = 4 px/mm, default block 30×20 mm,
   all coordinates snap to the current grid step. JSON v1 stores plain unitless
   floats — no migration needed; old files just show bigger-than-grid coords
