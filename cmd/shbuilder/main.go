@@ -164,6 +164,20 @@ func handleInput(q input.Source, ed *editor) {
 		ed.cursor = scr
 		world := ed.cam.ScreenToWorld(scr)
 
+		// клик по мини-карте — перенести зону видимости на кликнутую точку
+		if e.Kind == pointer.Press && e.Buttons.Contain(pointer.ButtonPrimary) {
+			if x0, y0, x1, y1 := miniMapScreenRect(ed); scr.X >= x0-3 && scr.X <= x1+3 && scr.Y >= y0-3 && scr.Y <= y1+3 {
+				box := miniMapBox(ed)
+				ww, wh := maxf(box.Size().X, 1), maxf(box.Size().Y, 1)
+				sc := minf(miniMapW/ww, miniMapH/wh)
+				worldX := box.Min.X + (scr.X-x0)/sc
+				worldY := box.Min.Y + (scr.Y-y0)/sc
+				ed.cam.Pan = geom.Vec{X: ed.viewW/2 - worldX*ed.cam.Zoom, Y: ed.viewH/2 - worldY*ed.cam.Zoom}
+				ed.msg = "переход по мини-карте"
+				continue
+			}
+		}
+
 		switch e.Kind {
 		case pointer.Press:
 			switch {
@@ -677,17 +691,15 @@ func fitToWindow(ed *editor) {
 	ed.msg = "вся схема в окне"
 }
 
-// drawMiniMap — уголок-ориентир: уменьшенная схема и рамка видимой области
-// (вместо скроллбаров: пан — ПКМ/СКМ, Home — вся схема, стрелки — листать).
-func drawMiniMap(gtx layout.Context, ed *editor) {
-	if ed.viewW == 0 || len(ed.doc.Blocks) == 0 {
-		return
-	}
-	const (
-		mw = float32(150)
-		mh = float32(96)
-		mg = float32(16)
-	)
+const (
+	miniMapW    = float32(150) // ширина мини-карты, px
+	miniMapH    = float32(96)  // высота мини-карты, px
+	miniMapG    = float32(16)  // отступ от краёв окна, px
+	miniMapPadY = float32(20)  // отступ от строки подсказки, px
+)
+
+// miniMapBox — габарит для мини-карты: блоки + текущая видимая область.
+func miniMapBox(ed *editor) geom.Rect {
 	box := docBBox(ed.doc, 10)
 	v0 := ed.cam.ScreenToWorld(geom.Vec{X: 0, Y: 0})
 	v1 := ed.cam.ScreenToWorld(geom.Vec{X: ed.viewW, Y: ed.viewH})
@@ -695,15 +707,33 @@ func drawMiniMap(gtx layout.Context, ed *editor) {
 	box.Min.Y = minf(box.Min.Y, v0.Y)
 	box.Max.X = maxf(box.Max.X, v1.X)
 	box.Max.Y = maxf(box.Max.Y, v1.Y)
+	return box
+}
+
+// miniMapScreenRect — экранный прямоугольник мини-карты.
+func miniMapScreenRect(ed *editor) (x0, y0, x1, y1 float32) {
+	x0 = ed.viewW - miniMapG - miniMapW
+	y0 = ed.viewH - miniMapG - miniMapH - miniMapPadY
+	return x0, y0, x0 + miniMapW, y0 + miniMapH
+}
+
+// drawMiniMap — уголок-ориентир: уменьшенная схема и рамка видимой области
+// (вместо скроллбаров: пан — ПКМ/СКМ, Home — вся схема, стрелки — листать,
+// клик по мини-карте — перенести зону видимости).
+func drawMiniMap(gtx layout.Context, ed *editor) {
+	if ed.viewW == 0 || len(ed.doc.Blocks) == 0 {
+		return
+	}
+	box := miniMapBox(ed)
 	ww, wh := maxf(box.Size().X, 1), maxf(box.Size().Y, 1)
-	sc := minf(mw/ww, mh/wh)
-	ox, oy := ed.viewW-mg-mw, ed.viewH-mg-mh-20 // над строкой подсказки
+	sc := minf(miniMapW/ww, miniMapH/wh)
+	ox, oy, _, _ := miniMapScreenRect(ed)
 	toMini := func(w geom.Vec) geom.Vec {
 		return geom.Vec{X: ox + (w.X-box.Min.X)*sc, Y: oy + (w.Y-box.Min.Y)*sc}
 	}
 	fillRect(gtx.Ops, image.Rectangle{
 		Min: image.Pt(int(ox-3), int(oy-3)),
-		Max: image.Pt(int(ox+mw+3), int(oy+mh+3)),
+		Max: image.Pt(int(ox+miniMapW+3), int(oy+miniMapH+3)),
 	}, color.NRGBA{R: 0x14, G: 0x18, B: 0x20, A: 0xc0})
 	for _, b := range ed.doc.Blocks {
 		a := toMini(geom.Vec{X: b.X, Y: b.Y})
@@ -719,7 +749,7 @@ func drawMiniMap(gtx layout.Context, ed *editor) {
 			Max: image.Pt(int(s.X), int(s.Y)),
 		}, colBlock)
 	}
-	va, vb := toMini(v0), toMini(v1) // рамка видимой области
+	va, vb := toMini(ed.cam.ScreenToWorld(geom.Vec{X: 0, Y: 0})), toMini(ed.cam.ScreenToWorld(geom.Vec{X: ed.viewW, Y: ed.viewH}))
 	// зона видимости: полупрозрачный фон + чёткая оранжевая кайма
 	vr := clip.Rect{Min: image.Pt(int(va.X), int(va.Y)), Max: image.Pt(int(vb.X), int(vb.Y))}
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0x30}, vr.Op())
