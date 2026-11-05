@@ -321,9 +321,10 @@ func SegCrossRect(a, b Vec, r Rect) (Vec, bool) {
 }
 
 // RouteAvoid — ортогональный маршрут p1→p2 (как Route), но обходящий
-// прямоугольники obstacles (передаются в мировых координатах блоков;
-// внутри расширяются на out для зазора).
-// Начинает с Route() и итеративно достраивает обходы вокруг попадающихся блоков.
+// прямоугольники obstacles (передаются в мировых координатах блоков).
+// Вокруг каждого блока — зона запрета «блок + зазор out»: маршрут не
+// заходит в неё, поэтому провод идёт с зазором и не прилипает к кромке
+// обтекаемого блока. Начинает с Route() и итеративно достраивает обходы.
 func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles []Rect) []Vec {
 	expanded := make([]Rect, len(obstacles))
 	for i, o := range obstacles {
@@ -337,17 +338,23 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles []Rect)
 		fixed := false
 		for i := 1; i < len(route) && !fixed; i++ {
 			a, b := route[i-1], route[i]
-			for _, obs := range obstacles {
-				pt, ok := SegCrossRect(a, b, obs)
-				if !ok {
-					continue
+			for k := 0; k < len(expanded) && !fixed; k++ {
+				// Сначала зона запрета (сегмент идет ближе зазора к блоку),
+				// затем сам блок: сегмент, начавшийся внутри зоны, зона не
+				// видит (eps-семантика SegCrossRect), а сквозь блок нельзя
+				// в любом случае.
+				for _, r := range [...]Rect{expanded[k], obstacles[k]} {
+					pt, ok := SegCrossRect(a, b, r)
+					if !ok {
+						continue
+					}
+					if near(pt, b) {
+						continue // сегмент заканчивается на границе — не сквозь
+					}
+					route = detourAround(route, i-1, obstacles[k], out)
+					fixed = true
+					break
 				}
-				if near(pt, b) {
-					continue // сегмент заканчивается на границе блока — не проходит сквозь
-				}
-				route = detourAround(route, i-1, obs, out)
-				fixed = true
-				break
 			}
 		}
 		if !fixed {
@@ -358,22 +365,27 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles []Rect)
 }
 
 // detourAround заменяет сегмент route[segIdx]→route[segIdx+1] на обход
-// вокруг препятствия obs: заходит к грани блока, уходит за его торец целиком,
-// выходит на продолжении исходной линии к цели b.
+// вокруг препятствия obs: заходит к границе зоны запрета, проходит мимо
+// блока на расстоянии out и выходит на продолжении исходной линии к цели b.
+// Все колена лежат на границе зоны (obs, расширенной на out) — зазор до
+// кромки блока сохраняется по всей длине обхода, провод не прилипает.
 func detourAround(route []Vec, segIdx int, obs Rect, out float32) []Vec {
 	a, b := route[segIdx], route[segIdx+1]
+	// границы зоны запрета: блок + зазор со всех сторон
+	zMinX, zMaxX := obs.Min.X-out, obs.Max.X+out
+	zMinY, zMaxY := obs.Min.Y-out, obs.Max.Y+out
 
 	var detour []Vec
 	if nearf(a.Y, b.Y) {
 		// горизонтальный сегмент: обход выше или ниже блока
 		y := a.Y
-		detourY := obs.Min.Y - out // выше
+		detourY := zMinY // выше блока, с зазором
 		if b.Y > obs.Max.Y {
-			detourY = obs.Max.Y + out // цель ниже — обходим снизу
+			detourY = zMaxY // цель ниже — обходим снизу
 		}
-		enterX := obs.Min.X
+		enterX := zMinX
 		if a.X > obs.Max.X {
-			enterX = obs.Max.X
+			enterX = zMaxX
 		}
 		detour = []Vec{
 			a,
@@ -386,13 +398,13 @@ func detourAround(route []Vec, segIdx int, obs Rect, out float32) []Vec {
 	} else if nearf(a.X, b.X) {
 		// вертикальный сегмент: обход слева или справа от блока
 		x := a.X
-		detourX := obs.Min.X - out // слева
+		detourX := zMinX // слева, с зазором
 		if b.X > obs.Max.X {
-			detourX = obs.Max.X + out // цель справа — обходим справа
+			detourX = zMaxX // цель справа — обходим справа
 		}
-		enterY := obs.Min.Y
+		enterY := zMinY
 		if a.Y > obs.Max.Y {
-			enterY = obs.Max.Y
+			enterY = zMaxY
 		}
 		detour = []Vec{
 			a,

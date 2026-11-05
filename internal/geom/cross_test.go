@@ -1,6 +1,9 @@
 package geom
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func ptEq(a, b Vec) bool { return near(a, b) }
 
@@ -158,5 +161,46 @@ func TestRouteAvoidNone(t *testing.T) {
 	}
 	if !near(route[0], Vec{X: 0, Y: 0}) || !near(route[len(route)-1], Vec{X: 100, Y: 100}) {
 		t.Fatalf("концы не совпадают: %v", route)
+	}
+}
+
+// segRectDist — расстояние между осевым отрезком a-b и осевым
+// прямоугольником r: зазоры по каждой оси, при разлете по обеим осям —
+// гипотенуза (ближайшая точка — угол r).
+func segRectDist(a, b Vec, r Rect) float32 {
+	x0, x1 := minf(a.X, b.X), maxf(a.X, b.X)
+	y0, y1 := minf(a.Y, b.Y), maxf(a.Y, b.Y)
+	dx := maxf(maxf(r.Min.X-x1, x0-r.Max.X), 0)
+	dy := maxf(maxf(r.Min.Y-y1, y0-r.Max.Y), 0)
+	return float32(math.Sqrt(float64(dx*dx + dy*dy)))
+}
+
+// RouteAvoid: зазор до обтекаемого блока сохраняется — ни один сегмент
+// не заходит в зону «блок + out» (провода нельзя приклеивать к кромке).
+func TestRouteAvoidKeepsGap(t *testing.T) {
+	const out float32 = 5
+	obs := []Rect{{Min: Vec{X: 40, Y: 40}, Max: Vec{X: 60, Y: 60}}}
+	cases := []struct {
+		name   string
+		p1, p2 Vec
+		s1, s2 Side
+	}{
+		{"горизонталь сквозь блок", Vec{X: 0, Y: 50}, Vec{X: 120, Y: 50}, SideRight, SideLeft},
+		{"вертикаль сквозь блок", Vec{X: 50, Y: 0}, Vec{X: 50, Y: 120}, SideBottom, SideTop},
+		{"колено рядом с блоком", Vec{X: 0, Y: 0}, Vec{X: 120, Y: 120}, SideRight, SideLeft},
+		{"пролет в 2 мм от блока", Vec{X: 0, Y: 38}, Vec{X: 120, Y: 38}, SideRight, SideLeft},
+	}
+	for _, c := range cases {
+		route := RouteAvoid(c.p1, c.s1, c.p2, c.s2, out, obs)
+		for i := 1; i < len(route); i++ {
+			d := segRectDist(route[i-1], route[i], obs[0])
+			if d < out-1e-3 {
+				t.Errorf("%s: сегмент %v→%v подошел к блоку на %v при зазоре %v",
+					c.name, route[i-1], route[i], d, out)
+			}
+		}
+		if !near(route[0], c.p1) || !near(route[len(route)-1], c.p2) {
+			t.Errorf("%s: концы маршрута потеряны: %v", c.name, route)
+		}
 	}
 }
