@@ -331,6 +331,11 @@ func SegCrossRect(a, b Vec, r Rect) (Vec, bool) {
 // вокруг него сделала бы любой подход «нарушением» — обход зацикливался
 // бы петлёй вокруг пина («флажок»). Достаточно не резать внутренность
 // блока — штырь-заглушка у пина лежит на кромке и не детектится.
+//
+// Обход никогда не делает «крюк» (вертикаль вниз с немедленным возвратом
+// вверх тем же x) и не крутит петли: детур выбирается из набора вариантов
+// (см. detourCandidates), а повторный обход того же места — блокируется
+// (seen), иначе итерации шли бы вхолостую до лимита.
 func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self []Rect) []Vec {
 	expanded := make([]Rect, len(obstacles))
 	for i, o := range obstacles {
@@ -340,7 +345,16 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 		}
 	}
 	route := Route(p1, s1, p2, s2, out)
-	for iter := 0; iter < 10; iter++ {
+
+	// место, где уже строился обход: (номер препятствия, точка входа).
+	// Повторный обход там же дал бы петлю («лепесток»), растущую до лимита.
+	type entry struct {
+		k  int
+		pt Vec
+	}
+	seen := make(map[entry]bool)
+
+	for iter, detours := 0, 0; iter < 10 && detours < 64; iter++ {
 		fixed := false
 		for i := 1; i < len(route) && !fixed; i++ {
 			a, b := route[i-1], route[i]
@@ -357,8 +371,16 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 					if near(pt, b) {
 						continue // сегмент заканчивается на границе — не сквозь
 					}
-					route = detourAround(route, i-1, obstacles[k], out)
-					fixed = true
+					e := entry{k, pt}
+					if seen[e] {
+						continue
+					}
+					seen[e] = true
+					next := detourAround(route, i-1, obstacles[k], out)
+					if samePath(next, route) {
+						continue // обход выродился — не крутим вхолостую
+					}
+					route, fixed, detours = next, true, detours+1
 					break
 				}
 			}
@@ -368,8 +390,16 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 				if !ok || near(pt, b) {
 					continue
 				}
-				route = detourAround(route, i-1, self[k], out)
-				fixed = true
+				e := entry{len(obstacles) + k, pt}
+				if seen[e] {
+					continue
+				}
+				seen[e] = true
+				next := detourAround(route, i-1, self[k], out)
+				if samePath(next, route) {
+					continue
+				}
+				route, fixed, detours = next, true, detours+1
 			}
 		}
 		if !fixed {
@@ -380,62 +410,138 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 }
 
 // detourAround заменяет сегмент route[segIdx]→route[segIdx+1] на обход
-// вокруг препятствия obs: заходит к границе зоны запрета, проходит мимо
-// блока на расстоянии out и выходит на продолжении исходной линии к цели b.
-// Все колена лежат на границе зоны (obs, расширенной на out) — зазор до
-// кромки блока сохраняется по всей длине обхода, провод не прилипает.
+// вокруг препятствия obs. Строит все разумные варианты (см.
+// detourCandidates) и выбирает лучший: без крюков-разворотов, затем
+// короче. Одно фиксированное правило обхода не годится: возврат на исходную
+// линию у точки b в части случаев продолжения маршрута давал крюк.
 func detourAround(route []Vec, segIdx int, obs Rect, out float32) []Vec {
+	cands := detourCandidates(route, segIdx, obs, out)
+	if len(cands) == 0 {
+		return route
+	}
+	best, bestH, bestL := cands[0], Hairpins(cands[0]), pathLen(cands[0])
+	for _, c := range cands[1:] {
+		h, l := Hairpins(c), pathLen(c)
+		if h < bestH || (h == bestH && l < bestL) {
+			best, bestH, bestL = c, h, l
+		}
+	}
+	return best
+}
+
+// detourCandidates — варианты обхода сегмента route[segIdx] вокруг obs.
+// Все колена — на границе зоны запрета (obs, расширенной на out), т.е. зазор
+// до кромки блока сохраняется. Для каждого из двух боков обхода строятся:
+//   - с возвратом на исходную линию у b (классический обход);
+//   - без возврата — когда следующий сегмент вертикален (продолжение идёт
+//     вдоль b.X), возврат не нужен и чаще всего создаёт крюк.
+//
+// Кандидаты сравниваются по всему маршруту, поэтому правильный бок обхода
+// выбирается с учётом того, куда маршрут идёт дальше.
+func detourCandidates(route []Vec, segIdx int, obs Rect, out float32) [][]Vec {
 	a, b := route[segIdx], route[segIdx+1]
 	// границы зоны запрета: блок + зазор со всех сторон
 	zMinX, zMaxX := obs.Min.X-out, obs.Max.X+out
 	zMinY, zMaxY := obs.Min.Y-out, obs.Max.Y+out
+	hasNext := segIdx+2 < len(route)
 
-	var detour []Vec
-	if nearf(a.Y, b.Y) {
+	var cands [][]Vec
+	add := func(body []Vec) {
+		full := make([]Vec, 0, len(route)+len(body))
+		full = append(full, route[:segIdx+1]...) // до a включительно
+		full = append(full, body...)
+		full = append(full, route[segIdx+2:]...)
+		full = Clean(full)
+		if !samePath(full, route) {
+			cands = append(cands, full)
+		}
+	}
+
+	switch {
+	case nearf(a.Y, b.Y):
 		// горизонтальный сегмент: обход выше или ниже блока
 		y := a.Y
-		detourY := zMinY // выше блока, с зазором
-		if b.Y > obs.Max.Y {
-			detourY = zMaxY // цель ниже — обходим снизу
-		}
 		enterX := zMinX
 		if a.X > obs.Max.X {
 			enterX = zMaxX
 		}
-		detour = []Vec{
-			a,
-			{X: enterX, Y: y},
-			{X: enterX, Y: detourY},
-			{X: b.X, Y: detourY},
-			{X: b.X, Y: y},
-			b,
+		if (b.X-a.X)*(enterX-a.X) < 0 {
+			enterX = a.X // граница позади движения — не откатываемся назад
 		}
-	} else if nearf(a.X, b.X) {
+		for _, dy := range [2]float32{zMinY, zMaxY} {
+			if nearf(dy, y) {
+				continue // обход по той же линии выродился
+			}
+			add([]Vec{{enterX, y}, {enterX, dy}, {b.X, dy}, {b.X, y}, b})
+			if hasNext && nearf(route[segIdx+2].X, b.X) {
+				add([]Vec{{enterX, y}, {enterX, dy}, {b.X, dy}})
+			}
+		}
+
+	case nearf(a.X, b.X):
 		// вертикальный сегмент: обход слева или справа от блока
 		x := a.X
-		detourX := zMinX // слева, с зазором
-		if b.X > obs.Max.X {
-			detourX = zMaxX // цель справа — обходим справа
-		}
 		enterY := zMinY
 		if a.Y > obs.Max.Y {
 			enterY = zMaxY
 		}
-		detour = []Vec{
-			a,
-			{X: x, Y: enterY},
-			{X: detourX, Y: enterY},
-			{X: detourX, Y: b.Y},
-			{X: x, Y: b.Y},
-			b,
+		if (b.Y-a.Y)*(enterY-a.Y) < 0 {
+			enterY = a.Y
 		}
-	} else {
-		return route
+		for _, dx := range [2]float32{zMinX, zMaxX} {
+			if nearf(dx, x) {
+				continue
+			}
+			add([]Vec{{x, enterY}, {dx, enterY}, {dx, b.Y}, {x, b.Y}, b})
+			if hasNext && nearf(route[segIdx+2].Y, b.Y) {
+				add([]Vec{{x, enterY}, {dx, enterY}, {dx, b.Y}})
+			}
+		}
 	}
+	return cands
+}
 
-	newRoute := make([]Vec, 0, len(route)+len(detour)-2)
-	newRoute = append(newRoute, route[:segIdx]...)
-	newRoute = append(newRoute, detour...)
-	newRoute = append(newRoute, route[segIdx+2:]...)
-	return newRoute
+// Hairpins — число «крюков»: три подряд точки с одной координатой, между
+// которыми направление меняется на противоположное (вертикаль вниз и тут же
+// вверх тем же x — ровно то, что заметил пользователь: «идет горизонтальная
+// линия… уходит вниз… меняет направление вверх, сохранением x координаты»).
+// По своду правил трассировки маршрут не должен содержать ни одного.
+func Hairpins(pts []Vec) int {
+	n := 0
+	for i := 0; i+2 < len(pts); i++ {
+		p0, p1, p2 := pts[i], pts[i+1], pts[i+2]
+		if nearf(p0.X, p1.X) && nearf(p1.X, p2.X) &&
+			(p1.Y-p0.Y)*(p2.Y-p1.Y) < 0 {
+			n++
+			continue
+		}
+		if nearf(p0.Y, p1.Y) && nearf(p1.Y, p2.Y) &&
+			(p1.X-p0.X)*(p2.X-p1.X) < 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// pathLen — длина ломаной.
+func pathLen(pts []Vec) float32 {
+	var sum float32
+	for i := 1; i < len(pts); i++ {
+		d := pts[i].Sub(pts[i-1])
+		sum += absf(d.X) + absf(d.Y)
+	}
+	return sum
+}
+
+// samePath — совпадение точек маршрута (с точностью eps).
+func samePath(a, b []Vec) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !near(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }

@@ -123,6 +123,28 @@ func TestDemoLinksDontCutBlocks(t *testing.T) {
 	}
 }
 
+// TestDemoLinksNoHooks — свод правил трассировки на демо-сцене: ни один
+// линк не содержит «крюка» (разворота вниз с возвратом вверх тем же x) и не
+// крутит петель. Регресс на отзыв «тут сделал 3».
+func TestDemoLinksNoHooks(t *testing.T) {
+	d := demoScene()
+	for _, l := range d.Links {
+		obs, self := linkObs(d, l.From, l.To)
+		p1, s1, ok1 := d.PinPos(l.From)
+		p2, s2, ok2 := d.PinPos(l.To)
+		if !ok1 || !ok2 {
+			t.Fatalf("пины не найдены: %+v → %+v", l.From, l.To)
+		}
+		route := geom.RouteAvoid(p1, s1, p2, s2, outset, obs, self)
+		if n := geom.Hairpins(route); n != 0 {
+			t.Errorf("линк %v→%v: крюков %d, маршрут %v", l.From, l.To, n, route)
+		}
+		if len(route) > 16 {
+			t.Errorf("линк %v→%v: петли (%d точек): %v", l.From, l.To, len(route), route)
+		}
+	}
+}
+
 // TestKeyDeliveryHeadless — без окна повторяет цепочку run(): input-area
 // (event.Op), FocusCmd, фильтры handleKeys, кадр, нажатия между кадрами,
 // снова handleKeys → processKey. Ловит обе ловушки, из-за которых

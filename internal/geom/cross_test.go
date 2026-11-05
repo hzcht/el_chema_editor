@@ -204,3 +204,105 @@ func TestRouteAvoidKeepsGap(t *testing.T) {
 		}
 	}
 }
+
+// pinAt — центр стороны r (тестовая вспомогательная).
+func pinAt(r Rect, s Side) Vec {
+	switch s {
+	case SideLeft:
+		return Vec{X: r.Min.X, Y: (r.Min.Y + r.Max.Y) / 2}
+	case SideRight:
+		return Vec{X: r.Max.X, Y: (r.Min.Y + r.Max.Y) / 2}
+	case SideTop:
+		return Vec{X: (r.Min.X + r.Max.X) / 2, Y: r.Min.Y}
+	case SideBottom:
+		return Vec{X: (r.Min.X + r.Max.X) / 2, Y: r.Max.Y}
+	}
+	return Vec{}
+}
+
+// near2 — прямоугольники ближе m друг к другу (для фильтра перебора).
+func near2(a, b Rect, m float32) bool {
+	return a.Max.X+m > b.Min.X && a.Min.X-m < b.Max.X &&
+		a.Max.Y+m > b.Min.Y && a.Min.Y-m < b.Max.Y
+}
+
+// TestRouteAvoidNoHooks — свод правил трассировки: в маршруте не бывает
+// «крюка» (горизонталь → вниз → вверх тем же x → горизонталь) и петель.
+// Регресс на отзыв «тут сделал 3»: до фикса такой же перебор давал сотни
+// тысяч крюков и маршруты, крутившие петли до лимита итераций.
+func TestRouteAvoidNoHooks(t *testing.T) {
+	const out float32 = 5
+	S := Rect{Min: Vec{X: 0, Y: 0}, Max: Vec{X: 30, Y: 20}}
+	sides := []Side{SideLeft, SideRight}
+
+	// точные конфигурации, на которых пользователь видел крюки
+	reported := []struct {
+		name   string
+		s1, s2 Side
+		O, T   Rect
+	}{
+		{"справа→слева", SideRight, SideLeft,
+			Rect{Min: Vec{X: -80, Y: -40}, Max: Vec{X: -50, Y: -20}},
+			Rect{Min: Vec{X: -80, Y: -80}, Max: Vec{X: -50, Y: -60}}},
+		{"справа→справа", SideRight, SideRight,
+			Rect{Min: Vec{X: -80, Y: -40}, Max: Vec{X: -50, Y: -20}},
+			Rect{Min: Vec{X: -80, Y: -80}, Max: Vec{X: -50, Y: -60}}},
+	}
+	for _, c := range reported {
+		p1, p2 := pinAt(S, c.s1), pinAt(c.T, c.s2)
+		route := RouteAvoid(p1, c.s1, p2, c.s2, out, []Rect{c.O}, []Rect{S, c.T})
+		if n := Hairpins(route); n != 0 {
+			t.Errorf("%s: крюков %d, маршрут %v", c.name, n, route)
+		}
+		if !near(route[0], p1) || !near(route[len(route)-1], p2) {
+			t.Errorf("%s: концы маршрута потеряны: %v", c.name, route)
+		}
+		if len(route) > 14 {
+			t.Errorf("%s: подозрительно длинный маршрут (петли?): %v", c.name, route)
+		}
+	}
+
+	// сплошной перебор: свой блок S, чужой O, цель T — ни одного крюка
+	total := 0
+	for tx := -80; tx <= 180; tx += 20 {
+		for ty := -80; ty <= 200; ty += 20 {
+			T := Rect{Min: Vec{X: float32(tx), Y: float32(ty)},
+				Max: Vec{X: float32(tx + 30), Y: float32(ty + 20)}}
+			if near2(S, T, 15) {
+				continue
+			}
+			for ox := -80; ox <= 180; ox += 20 {
+				for oy := -80; oy <= 200; oy += 20 {
+					O := Rect{Min: Vec{X: float32(ox), Y: float32(oy)},
+						Max: Vec{X: float32(ox + 30), Y: float32(oy + 20)}}
+					if near2(O, S, 15) || near2(O, T, 15) {
+						continue
+					}
+					for _, s1 := range sides {
+						for _, s2 := range sides {
+							p1, p2 := pinAt(S, s1), pinAt(T, s2)
+							route := RouteAvoid(p1, s1, p2, s2, out,
+								[]Rect{O}, []Rect{S, T})
+							total++
+							if n := Hairpins(route); n != 0 {
+								t.Fatalf("крюков %d: s1=%v s2=%v T=%v O=%v route=%v",
+									n, s1, s2, T, O, route)
+							}
+							if len(route) > 16 {
+								t.Fatalf("петли (%d точек): s1=%v s2=%v T=%v O=%v route=%v",
+									len(route), s1, s2, T, O, route)
+							}
+							if !near(route[0], p1) || !near(route[len(route)-1], p2) {
+								t.Fatalf("концы потеряны: %v", route)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if total < 100000 {
+		t.Fatalf("перебор слишком мал: %d маршрутов", total)
+	}
+	t.Logf("проверено маршрутов: %d", total)
+}
