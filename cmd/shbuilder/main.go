@@ -720,8 +720,10 @@ func drawMiniMap(gtx layout.Context, ed *editor) {
 		}, colBlock)
 	}
 	va, vb := toMini(v0), toMini(v1) // рамка видимой области
-	r := clip.Rect{Min: image.Pt(int(va.X), int(va.Y)), Max: image.Pt(int(vb.X), int(vb.Y))}
-	stroke(gtx.Ops, r.Path(), 1.5, colSel)
+	// зона видимости: полупрозрачный фон + чёткая оранжевая кайма
+	vr := clip.Rect{Min: image.Pt(int(va.X), int(va.Y)), Max: image.Pt(int(vb.X), int(vb.Y))}
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0x30}, vr.Op())
+	stroke(gtx.Ops, vr.Path(), 2.5, colSel)
 }
 
 // drawSelBox — полупрозрачная рамка выделения во время натягивания.
@@ -778,7 +780,16 @@ func drawLinks(gtx layout.Context, ed *editor) {
 			routes = append(routes, nil)
 			continue
 		}
-		r := geom.Route(p1, s1, p2, s2, outset)
+		// все блоки как препятствия (кроме блоков концов — RouteAvoid не childhood-блоки,
+		// так как маршрут начинается/кончается на их границах)
+		obs := make([]geom.Rect, 0, len(ed.doc.Blocks))
+		for _, b := range ed.doc.Blocks {
+			if b.ID == l.From.BlockID || b.ID == l.To.BlockID {
+				continue
+			}
+			obs = append(obs, b.Rect())
+		}
+		r := geom.RouteAvoid(p1, s1, p2, s2, outset, obs)
 		segs := make([]seg, 0, len(r)-1)
 		for i := 1; i < len(r); i++ {
 			segs = append(segs, seg{a: r[i-1], b: r[i]})
@@ -863,7 +874,15 @@ func drawRubber(gtx layout.Context, ed *editor) {
 	var pts []geom.Vec
 	if ed.linkHover {
 		p2, s2, _ := ed.doc.PinPos(ed.linkTo)
-		pts = geom.Route(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset)
+		// все блоки как препятствия, кроме блоков концов
+		obs := make([]geom.Rect, 0, len(ed.doc.Blocks))
+		for _, b := range ed.doc.Blocks {
+			if b.ID == ed.linkFrom.BlockID || b.ID == ed.linkTo.BlockID {
+				continue
+			}
+			obs = append(obs, b.Rect())
+		}
+		pts = geom.RouteAvoid(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset, obs)
 	} else {
 		pts = rubberRoute(ed.doc, ed.linkFrom, ed.cam.ScreenToWorld(ed.cursor), outset)
 	}

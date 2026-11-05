@@ -169,6 +169,9 @@ func hi(a, b float32) float32 {
 	return b
 }
 
+func minf(a, b float32) float32 { return lo(a, b) }
+func maxf(a, b float32) float32 { return hi(a, b) }
+
 // --- Маршрутизация ---------------------------------------------------------
 
 // Route строит ортогональный маршрут pin→pin с отступом наружу от каждой
@@ -259,4 +262,153 @@ func Clean(pts []Vec) []Vec {
 		i++
 	}
 	return res
+}
+
+// SegCrossRect — пересечение осевого отрезка a-b с ось-выровненным прямоугольником r.
+// Возвращает точку входа в r и true, только если отрезок идет извне r внутрь r.
+// Выход изнутри наружу (уже декорированный сегмент) — false, иначе зацикливание.
+func SegCrossRect(a, b Vec, r Rect) (Vec, bool) {
+	aInside := a.X >= r.Min.X-eps && a.X <= r.Max.X+eps &&
+		a.Y >= r.Min.Y-eps && a.Y <= r.Max.Y+eps
+	bInside := b.X >= r.Min.X-eps && b.X <= r.Max.X+eps &&
+		b.Y >= r.Min.Y-eps && b.Y <= r.Max.Y+eps
+	if aInside && bInside {
+		return Vec{}, false // оба внутри — не пересекаем границу
+	}
+	if aInside {
+		return Vec{}, false // выход изнутри — не наш случай
+	}
+
+	if nearf(a.Y, b.Y) {
+		y := a.Y
+		if y < r.Min.Y-eps || y > r.Max.Y+eps {
+			return Vec{}, false
+		}
+		if a.X < r.Min.X-eps {
+			if b.X > r.Min.X+eps || bInside {
+				return Vec{X: r.Min.X, Y: y}, true
+			}
+			return Vec{}, false
+		}
+		if a.X > r.Max.X+eps {
+			if b.X < r.Max.X-eps || bInside {
+				return Vec{X: r.Max.X, Y: y}, true
+			}
+			return Vec{}, false
+		}
+		return Vec{}, false
+	}
+	if nearf(a.X, b.X) {
+		x := a.X
+		if x < r.Min.X-eps || x > r.Max.X+eps {
+			return Vec{}, false
+		}
+		if a.Y < r.Min.Y-eps {
+			if b.Y > r.Min.Y+eps || bInside {
+				return Vec{X: x, Y: r.Min.Y}, true
+			}
+			return Vec{}, false
+		}
+		if a.Y > r.Max.Y+eps {
+			if b.Y < r.Max.Y-eps || bInside {
+				return Vec{X: x, Y: r.Max.Y}, true
+			}
+			return Vec{}, false
+		}
+		return Vec{}, false
+	}
+	return Vec{}, false
+}
+
+// RouteAvoid — ортогональный маршрут p1→p2 (как Route), но обходящий
+// прямоугольники obstacles (передаются в мировых координатах блоков;
+// внутри расширяются на out для зазора).
+// Начинает с Route() и итеративно достраивает обходы вокруг попадающихся блоков.
+func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles []Rect) []Vec {
+	expanded := make([]Rect, len(obstacles))
+	for i, o := range obstacles {
+		expanded[i] = Rect{
+			Min: Vec{X: o.Min.X - out, Y: o.Min.Y - out},
+			Max: Vec{X: o.Max.X + out, Y: o.Max.Y + out},
+		}
+	}
+	route := Route(p1, s1, p2, s2, out)
+	for iter := 0; iter < 10; iter++ {
+		fixed := false
+		for i := 1; i < len(route) && !fixed; i++ {
+			a, b := route[i-1], route[i]
+			for _, obs := range obstacles {
+				pt, ok := SegCrossRect(a, b, obs)
+				if !ok {
+					continue
+				}
+				if near(pt, b) {
+					continue // сегмент заканчивается на границе блока — не проходит сквозь
+				}
+				route = detourAround(route, i-1, obs, out)
+				fixed = true
+				break
+			}
+		}
+		if !fixed {
+			break
+		}
+	}
+	return Clean(route)
+}
+
+// detourAround заменяет сегмент route[segIdx]→route[segIdx+1] на обход
+// вокруг препятствия obs: заходит к грани блока, уходит за его торец целиком,
+// выходит на продолжении исходной линии к цели b.
+func detourAround(route []Vec, segIdx int, obs Rect, out float32) []Vec {
+	a, b := route[segIdx], route[segIdx+1]
+
+	var detour []Vec
+	if nearf(a.Y, b.Y) {
+		// горизонтальный сегмент: обход выше или ниже блока
+		y := a.Y
+		detourY := obs.Min.Y - out // выше
+		if b.Y > obs.Max.Y {
+			detourY = obs.Max.Y + out // цель ниже — обходим снизу
+		}
+		enterX := obs.Min.X
+		if a.X > obs.Max.X {
+			enterX = obs.Max.X
+		}
+		detour = []Vec{
+			a,
+			{X: enterX, Y: y},
+			{X: enterX, Y: detourY},
+			{X: b.X, Y: detourY},
+			{X: b.X, Y: y},
+			b,
+		}
+	} else if nearf(a.X, b.X) {
+		// вертикальный сегмент: обход слева или справа от блока
+		x := a.X
+		detourX := obs.Min.X - out // слева
+		if b.X > obs.Max.X {
+			detourX = obs.Max.X + out // цель справа — обходим справа
+		}
+		enterY := obs.Min.Y
+		if a.Y > obs.Max.Y {
+			enterY = obs.Max.Y
+		}
+		detour = []Vec{
+			a,
+			{X: x, Y: enterY},
+			{X: detourX, Y: enterY},
+			{X: detourX, Y: b.Y},
+			{X: x, Y: b.Y},
+			b,
+		}
+	} else {
+		return route
+	}
+
+	newRoute := make([]Vec, 0, len(route)+len(detour)-2)
+	newRoute = append(newRoute, route[:segIdx]...)
+	newRoute = append(newRoute, detour...)
+	newRoute = append(newRoute, route[segIdx+2:]...)
+	return newRoute
 }
