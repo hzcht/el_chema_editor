@@ -56,6 +56,12 @@ Gotchas (cost debugging time once — do not rediscover):
   wire crossings draw as hop arcs (later link hops over earlier), `Ctrl+Z/Y` undo/redo,
   `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press /
   Finish-on-release (idle clicks don't pollute history — `core.History`).
+- **Wire routing (stage 1)**: `geom.RouteAvoid` builds detour *candidates* and picks
+  "no hairpin → shorter"; contract is `geom.Hairpins(route)==0` (rules digest §4.6 in
+  `ideas.md`). Don't bring back the old single rule "always return to the original line
+  at b" — that is exactly what produced the «крюк» (down then up at the same x).
+  Regression: `TestRouteAvoidNoHooks` (scans ~142k block/obstacle configs) and
+  `TestDemoLinksNoHooks`.
 - **Gio keyboard focus (v0.10.3) is triple-deferred — drop any one and keys die silently**:
   every frame needs (1) `event.Op(gtx.Ops, keyTag)` (gives the handler `visible`),
   (2) `key.FocusFilter{Target: keyTag}` inside the `q.Event(...)` call (gives `focusable`),
