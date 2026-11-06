@@ -833,6 +833,32 @@ func drawGrid(gtx layout.Context, ed *editor) {
 	}
 }
 
+// compareLinks — стабильный ключ порядка отрисовки линков (П10): сначала
+// блок/пин начала, затем конца. Порядок не зависит от того, в какой
+// последовательности линки создавались, поэтому «кто прыгает мостиком»
+// не меняется между сессиями и запусками.
+func compareLinks(a, b core.Link) int {
+	switch {
+	case a.From.BlockID < b.From.BlockID:
+		return -1
+	case a.From.BlockID > b.From.BlockID:
+		return 1
+	case a.From.Pin < b.From.Pin:
+		return -1
+	case a.From.Pin > b.From.Pin:
+		return 1
+	case a.To.BlockID < b.To.BlockID:
+		return -1
+	case a.To.BlockID > b.To.BlockID:
+		return 1
+	case a.To.Pin < b.To.Pin:
+		return -1
+	case a.To.Pin > b.To.Pin:
+		return 1
+	}
+	return 0
+}
+
 // drawLinks рисует линки ортогональными маршрутами; пересечения разных
 // проводников на одной плоскости — «арка»: поздний линк перепрыгивает
 // ранний (мостик, §13.3), ранние рисуются сплошными.
@@ -855,14 +881,23 @@ func drawLinks(gtx layout.Context, ed *editor) {
 		routes = append(routes, segs)
 	}
 
-	for j, segs := range routes {
-		if segs == nil {
-			continue
+	// П10: порядок отрисовки — по ключу линка, а не по порядку создания.
+	order := make([]int, 0, len(routes))
+	for i, segs := range routes {
+		if segs != nil {
+			order = append(order, i)
 		}
+	}
+	slices.SortFunc(order, func(a, b int) int {
+		return compareLinks(ed.doc.Links[a], ed.doc.Links[b])
+	})
+
+	for pos, li := range order {
+		segs := routes[li]
 		// пересечения моего линка с более ранними → параметры вдоль сегментов
 		hopsPerSeg := make([][]float32, len(segs))
-		for i := 0; i < j; i++ {
-			for _, other := range routes[i] {
+		for q := 0; q < pos; q++ {
+			for _, other := range routes[order[q]] {
 				for u, s := range segs {
 					if pw, ok := geom.SegCross(s.a, s.b, other.a, other.b); ok {
 						a := ed.cam.WorldToScreen(s.a)
