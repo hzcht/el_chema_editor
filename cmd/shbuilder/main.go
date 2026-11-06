@@ -1112,9 +1112,6 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	if ed.msg != "" {
 		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
 	}
-	if ed.lastKey != "" {
-		drawHUDLine(gtx, ed.th, "клав: "+ed.lastKey, 32, colText)
-	}
 	h := float32(gtx.Constraints.Max.Y)
 	hint := "колесо: зум к курсору (5%)   0/=/-: зум 100% / + / –   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
 		"1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
