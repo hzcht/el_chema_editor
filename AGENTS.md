@@ -3,7 +3,7 @@
 ## What this repo is
 
 Greenfield project: a desktop circuit editor + AC/DC simulator in Go (spiritual
-rewrite of the author's old Pascal/Delphi school project). **No code exists yet.**
+rewrite of the author's old Pascal/Delphi school project). **Stage 1 (pure graphical editor) is implemented** in `cmd/shbuilder` + `internal/{core,geom}`; no physics/simulation yet.
 
 ## Key files
 
