@@ -5,12 +5,16 @@
 Greenfield project: a desktop circuit editor + AC/DC simulator in Go (spiritual
 rewrite of the author's old Pascal/Delphi school project). **No code exists yet.**
 
-## Key file
+## Key files
 
 - `ideas.md` — the brainstorm/spec. Read it before designing anything: it contains
   the task statement (§1), UI framework candidates and the comparison table (§2, §11),
-  proposed architecture (§3), topology/simulation approach (§4–5), roadmap (§8),
-  risks (§9), and **open questions (§10) that are still unresolved**.
+  proposed architecture (§3), topology/simulation approach (§4–5), routing rules
+  digest (§4.6), roadmap (§8), risks (§9), and **open questions (§10) that are still
+  unresolved**.
+- `problems.md` — journal of problems from play-test runs. One problem = one entry
+  with **Проблема / Что найдено / Что сделано / Что предлагается**. Append new
+  entries at the end of the numbered list, set the status, don't rewrite history.
 
 ## Ground rules
 
