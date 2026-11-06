@@ -57,7 +57,8 @@ Gotchas (cost debugging time once — do not rediscover):
 - **Editor hotkeys (stage 1)**: `1..6` add a block with N pins at cursor, `Del` deletes
   the selection (or block under cursor), `G` cycles grid step 5/10/20 mm, drag-from-pin
   creates a link (rubber exits along the pin normal, lane-bypass when pulled backwards),
-  wire crossings draw as hop arcs (later link hops over earlier), `Ctrl+Z/Y` undo/redo,
+  wire crossings draw as hop arcs (later in *key order* hops over earlier, see
+  `compareLinks` — deterministic, not creation order), `Ctrl+Z/Y` undo/redo,
   `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press /
   Finish-on-release (idle clicks don't pollute history — `core.History`).
 - **Wire routing (stage 1)**: `geom.RouteAvoid` builds detour *candidates* and picks
