@@ -171,6 +171,25 @@ func handleInput(q input.Source, ed *editor) {
 		ed.cursor = scr
 		world := ed.cam.ScreenToWorld(scr)
 
+		// Палитра слева: клик по строке ставит блок в центр видимой канвы.
+		// Если идёт драг/линк/панорама, курсор может заходить на палитру —
+		// такие события не перехватываем, иначе драг «залипнет».
+		if inPalette(scr) {
+			if e.Kind == pointer.Press && e.Buttons.Contain(pointer.ButtonPrimary) {
+				if n, ok := paletteHit(scr); ok {
+					b := addPinBlockAt(ed, n, ed.canvasInsertScreen())
+					ed.sel = map[string]bool{b.ID: true}
+					ed.msg = fmt.Sprintf("из палитры: %s (%d %s)", b.ID, n, pinWord(n))
+				} else {
+					ed.msg = "палитра: выберите строку (1..6 пинов)"
+				}
+				continue
+			}
+			if ed.mode == modeFree {
+				continue // палитра не отдаёт канве клики/колесо
+			}
+		}
+
 		// клик по мини-карте — перенести зону видимости на кликнутую точку
 		if e.Kind == pointer.Press && e.Buttons.Contain(pointer.ButtonPrimary) {
 			if x0, y0, x1, y1 := miniMapScreenRect(ed); scr.X >= x0-3 && scr.X <= x1+3 && scr.Y >= y0-3 && scr.Y <= y1+3 {
@@ -553,9 +572,29 @@ func redoMark(ed *editor) {
 	}
 }
 
-// addPinBlock — новый блок с n пинами под курсором (клавиши 1..6).
+// addPinBlock — новый блок с n пинами (клавиши 1..6): под курсором, а если
+// курсор вне канвы (палитра/за краем окна) — в центре видимой части канвы.
 func addPinBlock(ed *editor, n int) {
-	world := ed.cam.ScreenToWorld(ed.cursor)
+	addPinBlockAt(ed, n, ed.canvasInsertScreen())
+}
+
+// canvasInsertScreen — экранная точка вставки: курсор, если он над канвой,
+// иначе центр видимой части канвы (полоса палитры слева не считается).
+func (ed *editor) canvasInsertScreen() geom.Vec {
+	p := ed.cursor
+	if ed.viewW > paletteW && ed.viewH > 0 &&
+		p.X >= paletteW && p.X <= ed.viewW && p.Y >= 0 && p.Y <= ed.viewH {
+		return p
+	}
+	if ed.viewW <= paletteW || ed.viewH <= 0 {
+		return p // окно ещё не измерено — вставляем под курсором
+	}
+	return geom.Vec{X: (paletteW + ed.viewW) / 2, Y: ed.viewH / 2}
+}
+
+// addPinBlockAt — вставка блока с n пинами в экранной точке scr (undo-шаг).
+func addPinBlockAt(ed *editor, n int, scr geom.Vec) *core.Block {
+	world := ed.cam.ScreenToWorld(scr)
 	ed.history.Capture(ed.doc)
 	b := ed.doc.AddBlock(&core.Block{
 		Kind: "block",
@@ -570,6 +609,7 @@ func addPinBlock(ed *editor, n int) {
 		ed.dirty = true
 	}
 	ed.msg = fmt.Sprintf("добавлен %s (пинов %d)", b.ID, n)
+	return b
 }
 
 // pasteClip — вставка буфера под курсором: центр bbox бежит к курсору (снап),
@@ -672,17 +712,60 @@ func loadDoc(ed *editor) {
 // --- Отрисовка -------------------------------------------------------------
 
 var (
-	colBG     = color.NRGBA{R: 0xf7, G: 0xf7, B: 0xf8, A: 0xff}
-	colGrid   = color.NRGBA{R: 0xd9, G: 0xdc, B: 0xdf, A: 0xff}
-	colBlock  = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0xff}
-	colBord   = color.NRGBA{R: 0x2b, G: 0x4d, B: 0x91, A: 0xff}
-	colLink   = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0xff}
-	colJct    = color.NRGBA{R: 0xe0, G: 0x6a, B: 0x2a, A: 0xff} // junction-пин
-	colSel    = color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0xff} // рамка выделения
-	colFree   = color.NRGBA{R: 0xaa, G: 0xaa, B: 0xb2, A: 0xff} // свободный пин
-	colRubber = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0x80}
-	colText   = color.NRGBA{R: 0x55, G: 0x55, B: 0x60, A: 0xff}
+	colBG      = color.NRGBA{R: 0xf7, G: 0xf7, B: 0xf8, A: 0xff}
+	colGrid    = color.NRGBA{R: 0xd9, G: 0xdc, B: 0xdf, A: 0xff}
+	colBlock   = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0xff}
+	colBord    = color.NRGBA{R: 0x2b, G: 0x4d, B: 0x91, A: 0xff}
+	colLink    = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0xff}
+	colJct     = color.NRGBA{R: 0xe0, G: 0x6a, B: 0x2a, A: 0xff} // junction-пин
+	colSel     = color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0xff} // рамка выделения
+	colFree    = color.NRGBA{R: 0xaa, G: 0xaa, B: 0xb2, A: 0xff} // свободный пин
+	colRubber  = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0x80}
+	colText    = color.NRGBA{R: 0x55, G: 0x55, B: 0x60, A: 0xff}
+	colTextDim = color.NRGBA{R: 0x8a, G: 0x8a, B: 0x96, A: 0xff}
+	colPalBG   = color.NRGBA{R: 0xec, G: 0xee, B: 0xf2, A: 0xff} // фон палитры
+	colPalBord = color.NRGBA{R: 0xc2, G: 0xc7, B: 0xd0, A: 0xff} // кромка палитры
+	colPalHov  = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x22} // подсветка строки
 )
+
+// Палитра блоков слева (roadmap 1.1): ширина полосы, геометрия строк.
+const (
+	paletteW     = float32(132) // ширина палитры, px
+	paletteTitle = float32(46)  // высота заголовка, px
+	paletteRowH  = float32(46)  // высота строки, px
+	palPreviewW  = float32(38)  // мини-блок, px
+	palPreviewH  = float32(26)
+)
+
+// paletteRowRect — строка палитры i (0..5 = блок с 1..6 пинами), экран.
+func paletteRowRect(i int) geom.Rect {
+	return geom.NewRect(0, paletteTitle+float32(i)*paletteRowH, paletteW, paletteRowH)
+}
+
+// paletteHit — какая строка палитры накрыта точкой (n = 1..6).
+func paletteHit(scr geom.Vec) (int, bool) {
+	for i := 0; i < 6; i++ {
+		if paletteRowRect(i).Contains(scr) {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+// inPalette — точка лежит в полосе палитры (клики не уходят на канву).
+func inPalette(scr geom.Vec) bool { return scr.X >= 0 && scr.X <= paletteW }
+
+// pinWord — «1 пин / 2 пина / 5 пинов» для подписи строки.
+func pinWord(n int) string {
+	switch {
+	case n%10 == 1 && n%100 != 11:
+		return "пин"
+	case n%10 >= 2 && n%10 <= 4 && (n%100 < 12 || n%100 > 14):
+		return "пина"
+	default:
+		return "пинов"
+	}
+}
 
 func drawFrame(gtx layout.Context, ed *editor) {
 	ed.viewW = float32(gtx.Constraints.Max.X)
@@ -696,6 +779,7 @@ func drawFrame(gtx layout.Context, ed *editor) {
 	drawRubber(gtx, ed)
 	drawSelBox(gtx, ed)
 	drawMiniMap(gtx, ed)
+	drawPalette(gtx, ed)
 	drawHUD(gtx, ed)
 }
 
@@ -716,7 +800,8 @@ func docBBox(d *core.Document, pad float32) geom.Rect {
 	}
 }
 
-// fitToWindow — «Home»: вся схема целиком в окне с полями.
+// fitToWindow — «Home»: вся схема целиком в видимой канве (палитра слева
+// отнимает полосу) с полями.
 func fitToWindow(ed *editor) {
 	if ed.viewW == 0 || ed.viewH == 0 {
 		return
@@ -724,11 +809,13 @@ func fitToWindow(ed *editor) {
 	r := docBBox(ed.doc, 20)
 	w, h := maxf(r.Size().X, 1), maxf(r.Size().Y, 1)
 	const margin = 48.0 // px со всех сторон
-	z := geom.ClampZoom(minf((ed.viewW-2*margin)/w, (ed.viewH-2*margin)/h))
+	availW := maxf(ed.viewW-paletteW, 1)
+	z := geom.ClampZoom(minf(maxf((availW-2*margin)/w, 0.0001), (ed.viewH-2*margin)/h))
 	cx, cy := (r.Min.X+r.Max.X)/2, (r.Min.Y+r.Max.Y)/2
+	sx := paletteW + availW/2 // центр видимой канвы на экране
 	ed.cam = geom.Camera{
 		Zoom: z,
-		Pan:  geom.Vec{X: ed.viewW/2 - cx*z, Y: ed.viewH/2 - cy*z},
+		Pan:  geom.Vec{X: sx - cx*z, Y: ed.viewH/2 - cy*z},
 	}
 	ed.msg = "вся схема в окне"
 }
@@ -796,6 +883,57 @@ func drawMiniMap(gtx layout.Context, ed *editor) {
 	vr := clip.Rect{Min: image.Pt(int(va.X), int(va.Y)), Max: image.Pt(int(vb.X), int(vb.Y))}
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0x30}, vr.Op())
 	stroke(gtx.Ops, vr.Path(), 2.5, colSel)
+}
+
+// drawPalette — левая полоса с заготовками блоков: 6 строк (1..6 пинов),
+// мини-превью с пинами; клик по строке ставит блок в центр канвы.
+func drawPalette(gtx layout.Context, ed *editor) {
+	h := float32(gtx.Constraints.Max.Y)
+	fillRect(gtx.Ops, image.Rect(0, 0, int(paletteW), int(h)), colPalBG)
+	drawSeg(gtx.Ops, geom.Vec{X: paletteW, Y: 0}, geom.Vec{X: paletteW, Y: h}, 1.5, colPalBord)
+
+	label := func(txt string, x, y float32, sp unit.Sp, c color.NRGBA) {
+		t := op.Offset(image.Pt(int(x), int(y))).Push(gtx.Ops)
+		l := material.Label(ed.th, sp, txt)
+		l.Color = c
+		l.Layout(gtx)
+		t.Pop()
+	}
+	label("Палитра", 10, 8, 12, colText)
+	label("клик или 1..6", 10, 26, 9, colTextDim)
+
+	for i := 0; i < 6; i++ {
+		n := i + 1
+		row := paletteRowRect(i)
+		if ed.mode == modeFree && row.Contains(ed.cursor) {
+			fillRect(gtx.Ops, image.Rectangle{
+				Min: image.Pt(int(row.Min.X)+4, int(row.Min.Y)+3),
+				Max: image.Pt(int(row.Max.X)-4, int(row.Max.Y)-3),
+			}, colPalHov)
+		}
+		px := float32(10)
+		py := row.Min.Y + (row.Size().Y-palPreviewH)/2
+		drawPalettePreview(gtx, ed, n, px, py)
+		label(fmt.Sprintf("%d %s", n, pinWord(n)), px+palPreviewW+8, py+5, 10, colText)
+	}
+}
+
+// drawPalettePreview — мини-блок с пинами по раскладке core.PinLayout.
+func drawPalettePreview(gtx layout.Context, ed *editor, pins int, x, y float32) {
+	r := clip.Rect{Min: image.Pt(int(x), int(y)), Max: image.Pt(int(x+palPreviewW), int(y+palPreviewH))}
+	paint.FillShape(gtx.Ops, colBlock, r.Op())
+	stroke(gtx.Ops, r.Path(), 1, colBord)
+	b := &core.Block{X: x, Y: y, W: palPreviewW, H: palPreviewH, Pins: pins}
+	for i := 0; i < len(core.PinLayout(pins)); i++ {
+		pos, _, ok := b.PinPos(i)
+		if !ok {
+			continue
+		}
+		fillRect(gtx.Ops, image.Rectangle{
+			Min: image.Pt(int(pos.X)-2, int(pos.Y)-2),
+			Max: image.Pt(int(pos.X)+2, int(pos.Y)+2),
+		}, colFree)
+	}
 }
 
 // drawSelBox — полупрозрачная рамка выделения во время натягивания.
@@ -1238,14 +1376,15 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	}
 	h := float32(gtx.Constraints.Max.Y)
 	hint := "колесо: зум к курсору (5%)   0/=/-: зум 100% / + / –   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
-		"1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
+		"палитра слева или 1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
 		"рамка/Shift+клик: выделить   A/R/T/B H/V D: выровнять   Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
 }
 
 // drawHUDLine — одна строка HUD со смещением от верхнего левого угла (и цветом).
 func drawHUDLine(gtx layout.Context, th *material.Theme, txt string, dy float32, c color.NRGBA) {
-	t := op.Offset(image.Pt(0, int(dy))).Push(gtx.Ops)
+	// сдвиг вправо: левая полоса занята палитрой
+	t := op.Offset(image.Pt(int(paletteW), int(dy))).Push(gtx.Ops)
 	l := material.Label(th, unit.Sp(11), txt)
 	l.Color = c
 	l.Layout(gtx)

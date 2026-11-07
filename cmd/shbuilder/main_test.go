@@ -35,7 +35,8 @@ func TestArcStrokeHeadless(t *testing.T) {
 	s.Pop()
 }
 
-// Fit: центр bbox ложится в центр окна, весь bbox внутри с полями.
+// Fit: центр bbox ложится в центр видимой канвы (правее палитры),
+// весь bbox внутри с полями.
 func TestFitToWindow(t *testing.T) {
 	ed := &editor{
 		doc:     demoScene(),
@@ -49,13 +50,14 @@ func TestFitToWindow(t *testing.T) {
 	box := docBBox(ed.doc, 20)
 	cx := (box.Min.X + box.Max.X) / 2
 	cy := (box.Min.Y + box.Max.Y) / 2
-	mid := ed.cam.ScreenToWorld(geom.Vec{X: 800, Y: 450})
+	midX := paletteW + (ed.viewW-paletteW)/2
+	mid := ed.cam.ScreenToWorld(geom.Vec{X: midX, Y: ed.viewH / 2})
 	if abs2f(mid.X-cx) > 0.5 || abs2f(mid.Y-cy) > 0.5 {
 		t.Fatalf("центр: мир (%v,%v), ожидали (%v,%v)", mid.X, mid.Y, cx, cy)
 	}
 	for _, w := range []geom.Vec{box.Min, box.Max} {
 		s := ed.cam.WorldToScreen(w)
-		if s.X < 24 || s.X > 1600-24 || s.Y < 24 || s.Y > 900-24 {
+		if s.X < paletteW+24 || s.X > 1600-24 || s.Y < 24 || s.Y > 900-24 {
 			t.Fatalf("угол (%v,%v) вылез за поля: экран (%v,%v)", w.X, w.Y, s.X, s.Y)
 		}
 	}
