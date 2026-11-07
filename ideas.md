@@ -362,7 +362,8 @@ type Component struct {
 - `cmd/shbuilder`: `TestDemoLinksDontCutBlocks` (П7),
   `TestDemoLinksNoHooks` (П4), `TestArcStrokeHeadless` (П8),
   `TestLinkObstaclesForeignPins` и `TestDemoProductionRoutes` (П11),
-  `TestRoutePipelineDeterministic` (П10/П12).
+  `TestRoutePipelineDeterministic` (П10/П12), `TestEightLinksLanes`
+  (П12 в сцене из 8 линков).
 
 
 ---

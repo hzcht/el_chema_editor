@@ -227,7 +227,9 @@
 6. **Тесты:** `TestRouteAvoidForeignPin`, `TestDetourSideSticky`,
    `TestOffsetLanesSeparatesOverlaps/KeepsPinJunction/AvoidsBlock`,
    `TestLinkObstaclesForeignPins`, `TestDemoProductionRoutes`,
-   `TestRoutePipelineDeterministic` (независимость от порядка создания).
+   `TestRoutePipelineDeterministic` (независимость от порядка создания),
+   `TestEightLinksLanes` (8 линков, 8 пересечений: наложений длиннее
+   `laneGap` не осталось, все пути в своих пинах).
 7. **Проверка:** `gofmt` чисто, `go build ./... && go test ./... && go vet ./...`
    — зелёные; `shbuilder.exe` собран, smoke-прогон 4 с — живой.
 
