@@ -8,7 +8,16 @@ import "shbuilder/internal/geom"
 // PushOverlaps итеративно устраняет пересечения блоков документа:
 // двигаются только НЕ защищённые (protected) блоки.
 // Возвращает true, если пересечений не осталось.
+// Инвариант редактора: после любой мутации (drop/вставка/paste/align/load)
+// наложений быть не должно; если проходов не хватило, оставшиеся блоки
+// принудительно ставятся в ближайшую свободную клетку сетки.
 func PushOverlaps(d *Document, protected map[string]bool, grid float32, passes int) bool {
+	if len(d.Blocks) < 2 {
+		return true
+	}
+	if grid <= 0 {
+		grid = 1 // шаг поиска всегда > 0, иначе freeSpot зациклится
+	}
 	for ; passes > 0; passes-- {
 		changed := false
 		for i := 0; i < len(d.Blocks); i++ {
@@ -29,15 +38,89 @@ func PushOverlaps(d *Document, protected map[string]bool, grid float32, passes i
 			return true
 		}
 	}
-	// passes исчерпаны — финальная проверка
+	// Проходов не хватило (плотная сцена/цепочка): страховка — ставим
+	// подвижный блок в ближайшую свободную точку сетки. Позиция свободна от
+	// ВСЕХ остальных блоков, поэтому новых наложений не создаёт.
 	for i := 0; i < len(d.Blocks); i++ {
 		for j := i + 1; j < len(d.Blocks); j++ {
-			if d.Blocks[i].Rect().Overlaps(d.Blocks[j].Rect()) {
-				return false
+			a, b := d.Blocks[i], d.Blocks[j]
+			if !a.Rect().Overlaps(b.Rect()) {
+				continue
+			}
+			m, _, ok := moverPair(a, b, protected)
+			if !ok {
+				continue
+			}
+			if x, y, ok := freeSpot(d, m, grid); ok {
+				m.X, m.Y = x, y
 			}
 		}
 	}
+	return !HasOverlaps(d)
+}
+
+// HasOverlaps — есть ли хоть одна пара пересекающихся блоков.
+func HasOverlaps(d *Document) bool {
+	for i := 0; i < len(d.Blocks); i++ {
+		for j := i + 1; j < len(d.Blocks); j++ {
+			if d.Blocks[i].Rect().Overlaps(d.Blocks[j].Rect()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// freeSpot — ближайшая к текущей позиции m точка сетки, прямоугольник из
+// которой не пересекает ни один другой блок. Кольца растут детерминированно,
+// внутри кольца выбирается минимальное смещение (ничьи — по порядку обхода).
+func freeSpot(d *Document, m *Block, grid float32) (float32, float32, bool) {
+	const maxRing = 512 // 512 клеток с запасом покрывают любую сцену этапа 1
+	bx, by := geom.Snap(m.X, grid), geom.Snap(m.Y, grid)
+	for k := 0; k <= maxRing; k++ {
+		var bestX, bestY, bestD float32
+		found := false
+		for dx := -k; dx <= k; dx++ {
+			for dy := -k; dy <= k; dy++ {
+				if max(float32(absInt(dx)), float32(absInt(dy))) != float32(k) {
+					continue
+				}
+				nx, ny := bx+float32(dx)*grid, by+float32(dy)*grid
+				if !freeAt(d, m, nx, ny) {
+					continue
+				}
+				d2 := float32(dx*dx + dy*dy)
+				if !found || d2 < bestD {
+					found, bestX, bestY, bestD = true, nx, ny, d2
+				}
+			}
+		}
+		if found {
+			return bestX, bestY, true
+		}
+	}
+	return 0, 0, false
+}
+
+// freeAt — свободен ли прямоугольник m в точке (x, y) от остальных блоков.
+func freeAt(d *Document, m *Block, x, y float32) bool {
+	r := geom.NewRect(x, y, m.W, m.H)
+	for _, b := range d.Blocks {
+		if b == m {
+			continue
+		}
+		if r.Overlaps(b.Rect()) {
+			return false
+		}
+	}
 	return true
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // moverPair выбирает, кого двигать: защищённый блок не двигается вообще.

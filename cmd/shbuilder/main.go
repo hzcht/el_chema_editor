@@ -131,6 +131,12 @@ func newApp() *editor {
 		file:    path,
 		msg:     msg,
 	}
+	// Инвариант: блоки не накладываются. Старый/ручной файл с пересечениями
+	// разводим сразу, до снимка истории (undo не должен возвращать наложения).
+	if core.HasOverlaps(d) {
+		core.PushOverlaps(d, nil, 10, 64)
+		ed.msg += " (перекрытия разведены)"
+	}
 	ed.history.Reset(d)
 	return ed
 }
@@ -329,12 +335,20 @@ func handleInput(q input.Source, ed *editor) {
 }
 
 // PushOverlaps — тонкие обёртки над core.PushOverlaps с текущим шагом сетки.
+// Сначала двигаются незащищённые блоки; если проходов не хватило и наложения
+// остались, разрешаем двигать всех — инвариант «блоки не пересекаются» важнее.
 func (ed *editor) pushOverlaps(id string) {
-	core.PushOverlaps(ed.doc, map[string]bool{id: true}, ed.grid, 8)
+	core.PushOverlaps(ed.doc, map[string]bool{id: true}, ed.grid, 64)
+	if core.HasOverlaps(ed.doc) {
+		core.PushOverlaps(ed.doc, nil, ed.grid, 64)
+	}
 }
 
 func (ed *editor) pushOverlapsSel() {
-	core.PushOverlaps(ed.doc, selSet(ed.sel), ed.grid, 12)
+	core.PushOverlaps(ed.doc, selSet(ed.sel), ed.grid, 64)
+	if core.HasOverlaps(ed.doc) {
+		core.PushOverlaps(ed.doc, nil, ed.grid, 64)
+	}
 }
 
 // snapSelection — snap к текущей сетке для всех выделенных.
@@ -546,6 +560,11 @@ func arrangeKey(name string, shift bool, ed *editor) {
 	}
 	ed.history.Capture(ed.doc)
 	op(ed.doc, selIDs(ed.sel), ed.grid)
+	// Выравнивание/распределение может свести блоки друг на друга — сразу
+	// расталкиваем, иначе нарушается инвариант «блоки не пересекаются».
+	if !core.PushOverlaps(ed.doc, nil, ed.grid, 64) {
+		human += " (наложения не развелись)"
+	}
 	if ed.history.Finish(ed.doc) {
 		ed.dirty = true
 	}
@@ -702,11 +721,16 @@ func loadDoc(ed *editor) {
 		ed.msg = fmt.Sprintf("load: %v", err)
 		return
 	}
+	note := ""
+	if core.HasOverlaps(nd) {
+		core.PushOverlaps(nd, nil, ed.grid, 64)
+		note = " (перекрытия разведены)"
+	}
 	ed.doc = nd
 	ed.history.Reset(nd)
 	ed.dirty = false
 	ed.sel = nil
-	ed.msg = fmt.Sprintf("загружен %s (%d блоков)", ed.file, len(nd.Blocks))
+	ed.msg = fmt.Sprintf("загружен %s (%d блоков)%s", ed.file, len(nd.Blocks), note)
 }
 
 // --- Отрисовка -------------------------------------------------------------
