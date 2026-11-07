@@ -38,6 +38,9 @@ const (
 	outset   = 5.0     // отступ выхода провода от пина, мм
 	pinHitR  = 3.0     // радиус попадания в пин, мм
 	pinSize  = 1.5     // половина размера пина, мм
+	pinGap   = 2.0     // зазор до чужого пина: провод не идёт через точку подключения, мм
+	laneGap  = 2.0     // разводка коллинеарных наложений линков, мм
+	stickyMM = 3.0     // гистерезис стороны обхода при сдвиге блока, мм
 	arcR     = 1.6     // радиус арки на пересечении проводников, мм
 	worldMax = 50000.0 // граница мира, мм (рисуем сетку до неё)
 )
@@ -67,6 +70,9 @@ type editor struct {
 	viewW   float32 // размер окна в px (обновляется в drawFrame)
 	viewH   float32
 	lastKey string // последняя нажатая клавиша (отладка клавиатуры)
+	// lastRoutes — прошлые маршруты линков по ключу: память стороны обхода
+	// (гистерезис), чтобы линия не перескакивала от микросдвига блока.
+	lastRoutes map[string][]geom.Vec
 
 	history core.History
 	file    string // путь текущего файла (аргумент CLI или schematic.json)
@@ -864,40 +870,62 @@ func compareLinks(a, b core.Link) int {
 // ранний (мостик, §13.3), ранние рисуются сплошными.
 func drawLinks(gtx layout.Context, ed *editor) {
 	type seg struct{ a, b geom.Vec }
-	routes := make([][]seg, 0, len(ed.doc.Links))
+	type routed struct {
+		link core.Link
+		path []geom.Vec
+		obs  []geom.Rect
+	}
+	items := make([]routed, 0, len(ed.doc.Links))
+	prevRoutes := make(map[string][]geom.Vec, len(ed.doc.Links))
 	for _, l := range ed.doc.Links {
 		p1, s1, ok1 := ed.doc.PinPos(l.From)
 		p2, s2, ok2 := ed.doc.PinPos(l.To)
 		if !ok1 || !ok2 {
-			routes = append(routes, nil)
 			continue
 		}
-		obs, self := linkObs(ed.doc, l.From, l.To)
-		r := geom.RouteAvoid(p1, s1, p2, s2, outset, obs, self)
-		segs := make([]seg, 0, len(r)-1)
-		for i := 1; i < len(r); i++ {
-			segs = append(segs, seg{a: r[i-1], b: r[i]})
-		}
-		routes = append(routes, segs)
+		key := linkKey(l)
+		path := geom.RouteEx(p1, s1, p2, s2, outset, geom.RouteOpts{
+			Obstacles: linkObstacles(ed.doc, l.From, l.To),
+			Prev:      ed.lastRoutes[key], // гистерезис стороны обхода
+			Sticky:    stickyMM,
+		})
+		prevRoutes[key] = path
+		items = append(items, routed{
+			link: l,
+			path: path,
+			obs:  laneRects(ed.doc, l.From, l.To),
+		})
 	}
+	ed.lastRoutes = prevRoutes
 
 	// П10: порядок отрисовки — по ключу линка, а не по порядку создания.
-	order := make([]int, 0, len(routes))
-	for i, segs := range routes {
-		if segs != nil {
-			order = append(order, i)
-		}
-	}
-	slices.SortFunc(order, func(a, b int) int {
-		return compareLinks(ed.doc.Links[a], ed.doc.Links[b])
-	})
+	slices.SortFunc(items, func(a, b routed) int { return compareLinks(a.link, b.link) })
 
-	for pos, li := range order {
-		segs := routes[li]
+	// О1: коллинеарные наложения разводим полосами (поздний линк уходит в
+	// сторону); сами пути при этом не перестают приходить в свои пины.
+	paths := make([][]geom.Vec, len(items))
+	rects := make([][]geom.Rect, len(items))
+	for i := range items {
+		paths[i] = items[i].path
+		rects[i] = items[i].obs
+	}
+	paths = geom.OffsetLanes(paths, rects, laneGap)
+
+	all := make([][]seg, len(items))
+	for i := range items {
+		segs := make([]seg, 0, len(paths[i])-1)
+		for k := 1; k < len(paths[i]); k++ {
+			segs = append(segs, seg{a: paths[i][k-1], b: paths[i][k]})
+		}
+		all[i] = segs
+	}
+
+	for pos := range all {
+		segs := all[pos]
 		// пересечения моего линка с более ранними → параметры вдоль сегментов
 		hopsPerSeg := make([][]float32, len(segs))
 		for q := 0; q < pos; q++ {
-			for _, other := range routes[order[q]] {
+			for _, other := range all[q] {
 				for u, s := range segs {
 					if pw, ok := geom.SegCross(s.a, s.b, other.a, other.b); ok {
 						a := ed.cam.WorldToScreen(s.a)
@@ -967,8 +995,9 @@ func drawRubber(gtx layout.Context, ed *editor) {
 	var pts []geom.Vec
 	if ed.linkHover {
 		p2, s2, _ := ed.doc.PinPos(ed.linkTo)
-		obs, self := linkObs(ed.doc, ed.linkFrom, ed.linkTo)
-		pts = geom.RouteAvoid(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset, obs, self)
+		pts = geom.RouteEx(p1, sideOf(ed.doc, ed.linkFrom), p2, s2, outset, geom.RouteOpts{
+			Obstacles: linkObstacles(ed.doc, ed.linkFrom, ed.linkTo),
+		})
 	} else {
 		pts = rubberRoute(ed.doc, ed.linkFrom, ed.cam.ScreenToWorld(ed.cursor), outset)
 	}
@@ -987,6 +1016,66 @@ func drawRubber(gtx layout.Context, ed *editor) {
 func sideOf(d *core.Document, ep core.Endpoint) geom.Side {
 	_, s, _ := d.PinPos(ep)
 	return s
+}
+
+// linkKey — стабильный ключ линка для памяти маршрутов (гистерезис).
+func linkKey(l core.Link) string { return l.From.String() + "->" + l.To.String() }
+
+// linkObstacles — препятствия маршрута линка. Чужие блоки обходятся с зоной
+// запрета «блок + outset», собственные блоки линка — только без разрезания
+// внутренности (пин лежит на кромке, зона вокруг него ломала бы подход).
+// Чужие пины — точки с зазором pinGap: провод не проходит ровно через точку
+// подключения, иначе он выглядит подключённым, хотя это не так.
+func linkObstacles(d *core.Document, from, to core.Endpoint) []geom.Obstacle {
+	out := make([]geom.Obstacle, 0, len(d.Blocks)+8)
+	for _, b := range d.Blocks {
+		r := b.Rect()
+		if b.ID == from.BlockID || b.ID == to.BlockID {
+			out = append(out, geom.Obstacle{Rect: r})
+		} else {
+			out = append(out, geom.Obstacle{Rect: r, Gap: outset})
+		}
+	}
+	for _, b := range d.Blocks {
+		for i := 0; i < len(core.PinLayout(b.Pins)); i++ {
+			ep := core.Endpoint{BlockID: b.ID, Pin: i}
+			if ep == from || ep == to {
+				continue
+			}
+			p, _, ok := b.PinPos(i)
+			if !ok {
+				continue
+			}
+			out = append(out, geom.Obstacle{Rect: geom.Rect{Min: p, Max: p}, Gap: pinGap})
+		}
+	}
+	return out
+}
+
+// laneRects — прямоугольники для проверки сдвига полос (geom.OffsetLanes):
+// блоки и зоны чужих пинов. Свои пины линка не мешают — путь из них выходит.
+func laneRects(d *core.Document, from, to core.Endpoint) []geom.Rect {
+	out := make([]geom.Rect, 0, len(d.Blocks)+8)
+	for _, b := range d.Blocks {
+		out = append(out, b.Rect())
+	}
+	for _, b := range d.Blocks {
+		for i := 0; i < len(core.PinLayout(b.Pins)); i++ {
+			ep := core.Endpoint{BlockID: b.ID, Pin: i}
+			if ep == from || ep == to {
+				continue
+			}
+			p, _, ok := b.PinPos(i)
+			if !ok {
+				continue
+			}
+			out = append(out, geom.Rect{
+				Min: geom.Vec{X: p.X - pinGap, Y: p.Y - pinGap},
+				Max: geom.Vec{X: p.X + pinGap, Y: p.Y + pinGap},
+			})
+		}
+	}
+	return out
 }
 
 // linkObs — препятствия для маршрута линка. Чужие блоки (obstacles) обходят
