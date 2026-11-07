@@ -121,6 +121,122 @@ func samePathVec(a, b []geom.Vec) bool {
 	return true
 }
 
+// TestEightLinksLanes — расширенная мультилинковая сцена (8 линков, 4 пина
+// на блок, центральный блок-препятствие). Проверяет П4/П5/П7 и П12: после
+// разводки не остаётся длинных коллинеарных наложений, все пути приходят в
+// свои пины, пересечения между линками есть (мостики будут).
+func TestEightLinksLanes(t *testing.T) {
+	d := &core.Document{}
+	d.AddBlock(&core.Block{ID: "A", X: 20, Y: 20, W: 30, H: 20, Pins: 4})
+	d.AddBlock(&core.Block{ID: "B", X: 260, Y: 20, W: 30, H: 20, Pins: 4})
+	d.AddBlock(&core.Block{ID: "C", X: 20, Y: 180, W: 30, H: 20, Pins: 4})
+	d.AddBlock(&core.Block{ID: "D", X: 260, Y: 180, W: 30, H: 20, Pins: 4})
+	d.AddBlock(&core.Block{ID: "E", X: 140, Y: 90, W: 30, H: 20, Pins: 4})
+
+	pairs := [][2]core.Endpoint{
+		{{BlockID: "A", Pin: 1}, {BlockID: "B", Pin: 0}},
+		{{BlockID: "A", Pin: 3}, {BlockID: "C", Pin: 1}},
+		{{BlockID: "B", Pin: 3}, {BlockID: "D", Pin: 2}},
+		{{BlockID: "C", Pin: 3}, {BlockID: "D", Pin: 0}},
+		{{BlockID: "A", Pin: 0}, {BlockID: "D", Pin: 3}},
+		{{BlockID: "B", Pin: 2}, {BlockID: "C", Pin: 0}},
+		{{BlockID: "C", Pin: 2}, {BlockID: "D", Pin: 1}},
+		{{BlockID: "A", Pin: 2}, {BlockID: "B", Pin: 1}},
+	}
+	for _, p := range pairs {
+		if !d.AddLink(p[0], p[1]) {
+			t.Fatalf("линк не добавился: %v → %v", p[0], p[1])
+		}
+	}
+
+	paths := routeScenePaths(d)
+	if len(paths) != len(pairs) {
+		t.Fatalf("маршрутов %d, ждали %d", len(paths), len(pairs))
+	}
+
+	type named struct {
+		key  string
+		path []geom.Vec
+	}
+	list := make([]named, 0, len(paths))
+	for k, p := range paths {
+		list = append(list, named{k, p})
+	}
+	slices.SortFunc(list, func(a, b named) int {
+		switch {
+		case a.key < b.key:
+			return -1
+		case a.key > b.key:
+			return 1
+		}
+		return 0
+	})
+
+	for _, it := range list {
+		if n := geom.Hairpins(it.path); n != 0 {
+			t.Fatalf("линк %s: крюков %d: %v", it.key, n, it.path)
+		}
+		if len(it.path) > 24 {
+			t.Fatalf("линк %s: петли (%d точек): %v", it.key, len(it.path), it.path)
+		}
+	}
+	// наложений длиннее laneGap не осталось
+	for i := 0; i < len(list); i++ {
+		for k := 1; k < len(list[i].path); k++ {
+			a, b := list[i].path[k-1], list[i].path[k]
+			for j := 0; j < i; j++ {
+				for m := 1; m < len(list[j].path); m++ {
+					if l := collinearOverlapVec(a, b, list[j].path[m-1], list[j].path[m]); l > laneGap+1e-3 {
+						t.Fatalf("наложение %.1f мм: %s %v→%v и %s: %v",
+							l, list[i].key, a, b, list[j].key, list[j].path)
+					}
+				}
+			}
+		}
+	}
+	// пересечения между линками действительно есть
+	cross := 0
+	for i := 0; i < len(list); i++ {
+		for k := 1; k < len(list[i].path); k++ {
+			for j := 0; j < i; j++ {
+				for m := 1; m < len(list[j].path); m++ {
+					if _, ok := geom.SegCross(list[i].path[k-1], list[i].path[k],
+						list[j].path[m-1], list[j].path[m]); ok {
+						cross++
+					}
+				}
+			}
+		}
+	}
+	if cross == 0 {
+		t.Fatal("в сцене нет пересечений — мостики не проверены")
+	}
+	t.Logf("линков: %d, пересечений: %d", len(list), cross)
+}
+
+// collinearOverlapVec — длина общего участка коллинеарных осевых сегментов.
+func collinearOverlapVec(a, b, c, d geom.Vec) float32 {
+	lo := func(x, y float32) float32 {
+		if x < y {
+			return x
+		}
+		return y
+	}
+	hi := func(x, y float32) float32 {
+		if x > y {
+			return x
+		}
+		return y
+	}
+	if abs2f(a.Y-b.Y) <= 1e-3 && abs2f(c.Y-d.Y) <= 1e-3 && abs2f(a.Y-c.Y) <= 1e-3 {
+		return hi(0, lo(hi(a.X, b.X), hi(c.X, d.X))-hi(lo(a.X, b.X), lo(c.X, d.X)))
+	}
+	if abs2f(a.X-b.X) <= 1e-3 && abs2f(c.X-d.X) <= 1e-3 && abs2f(a.X-c.X) <= 1e-3 {
+		return hi(0, lo(hi(a.Y, b.Y), hi(c.Y, d.Y))-hi(lo(a.Y, b.Y), lo(c.Y, d.Y)))
+	}
+	return 0
+}
+
 // TestDemoProductionRoutes — демо-сцена проходит боевой конвейер (блоки +
 // чужие пины): без крюков и петель, концы на пинах, ни один сегмент не
 // подходит к чужому пину ближе pinGap.
