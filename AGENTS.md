@@ -79,6 +79,13 @@ cd spike/wails ; go build -tags desktop,production -o spike-wails.exe . ; .\spik
   at the END of every frame. `key.Filter{}` must list every modifier in
   `Optional:` (Shift/Ctrl/Alt/Command/Super), else modified keys fail
   `keyFilterMatch`. Headless regression: `TestKeyDeliveryHeadless`.
+- **Block overlap invariant (stage 1):** blocks must never overlap. After any
+  mutation that can move blocks (drop, insert/paste, align/distribute, load) the
+  editor runs `core.PushOverlaps` and checks `core.HasOverlaps`. `arrangeKey`
+  always pushes after align/distribute; `PushOverlaps` falls back to placing the
+  movable block in the nearest free grid cell, so it resolves or reports
+  `false` only when both blocks are protected.
+
 - **World unit = 1 mm** (ADR-0006): zoom 100% = 4 px/mm, default block 30×20 mm,
   all coords snap to the current grid step. JSON v1 stores plain unitless
   floats — old files just show bigger-than-grid coords (resnap by hand).
