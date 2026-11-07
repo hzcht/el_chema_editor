@@ -320,6 +320,29 @@ func SegCrossRect(a, b Vec, r Rect) (Vec, bool) {
 	return Vec{}, false
 }
 
+// Obstacle — препятствие маршрута: прямоугольник и зазор до него.
+// Gap == 0 — только не резать внутренность (собственные блоки линка: пин
+// лежит на кромке, и зона вокруг него сделала бы любой подход «нарушением»).
+// Прямоугольник нулевого размера — точка (чужой пин): маршрут обязан пройти
+// не ближе Gap, иначе провод визуально «втыкается» в точку подключения.
+type Obstacle struct {
+	Rect Rect
+	Gap  float32
+}
+
+// RouteOpts — необязательные параметры RouteEx.
+type RouteOpts struct {
+	// Obstacles — что обходить и с каким зазором.
+	Obstacles []Obstacle
+	// Prev — прошлый маршрут этого же линка (nil — памяти нет). Служит
+	// только для выбора стороны обхода, геометрию не переиспользует.
+	Prev []Vec
+	// Sticky — гистерезис, мм: если вариант обхода не длиннее лучшего
+	// более чем на Sticky, предпочитается тот, что ближе к Prev. Так
+	// сторона обхода не перескакивает от микросдвига блока.
+	Sticky float32
+}
+
 // RouteAvoid — ортогональный маршрут p1→p2 (как Route), но обходящий
 // прямоугольники obstacles (передаются в мировых координатах блоков).
 // Вокруг каждого блока — зона запрета «блок + зазор out»: маршрут не
@@ -336,14 +359,22 @@ func SegCrossRect(a, b Vec, r Rect) (Vec, bool) {
 // вверх тем же x) и не крутит петли: детур выбирается из набора вариантов
 // (см. detourCandidates), а повторный обход того же места — блокируется
 // (seen), иначе итерации шли бы вхолостую до лимита.
+//
+// RouteAvoid — обёртка над RouteEx для простых случаев (только блоки).
+// Чужие пины и гистерезис стороны передаются через RouteEx/RouteOpts.
 func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self []Rect) []Vec {
-	expanded := make([]Rect, len(obstacles))
-	for i, o := range obstacles {
-		expanded[i] = Rect{
-			Min: Vec{X: o.Min.X - out, Y: o.Min.Y - out},
-			Max: Vec{X: o.Max.X + out, Y: o.Max.Y + out},
-		}
+	opts := RouteOpts{Obstacles: make([]Obstacle, 0, len(obstacles)+len(self))}
+	for _, o := range obstacles {
+		opts.Obstacles = append(opts.Obstacles, Obstacle{Rect: o, Gap: out})
 	}
+	for _, s := range self {
+		opts.Obstacles = append(opts.Obstacles, Obstacle{Rect: s})
+	}
+	return RouteEx(p1, s1, p2, s2, out, opts)
+}
+
+// RouteEx — маршрут с полным набором препятствий и памятью стороны обхода.
+func RouteEx(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, opts RouteOpts) []Vec {
 	route := Route(p1, s1, p2, s2, out)
 
 	// место, где уже строился обход: (номер препятствия, точка входа).
@@ -358,17 +389,23 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 		fixed := false
 		for i := 1; i < len(route) && !fixed; i++ {
 			a, b := route[i-1], route[i]
-			for k := 0; k < len(expanded) && !fixed; k++ {
+			for k := 0; k < len(opts.Obstacles) && !fixed; k++ {
+				o := opts.Obstacles[k]
 				// Сначала зона запрета (сегмент идет ближе зазора к блоку),
-				// затем сам блок: сегмент, начавшийся внутри зоны, зона не
-				// видит (eps-семантика SegCrossRect), а сквозь блок нельзя
-				// в любом случае.
-				for _, r := range [...]Rect{expanded[k], obstacles[k]} {
-					pt, ok := SegCrossRect(a, b, r)
-					if !ok {
-						continue
-					}
-					if near(pt, b) {
+				// затем сам прямоугольник: сегмент, начавшийся внутри зоны, зона
+				// не видит (eps-семантика SegCrossRect), а сквозь блок нельзя
+				// в любом случае. Для Gap == 0 проверяется только прямоугольник.
+				var checks [2]Rect
+				n := 1
+				checks[0] = o.Rect
+				if o.Gap > 0 {
+					checks[0] = expandRect(o.Rect, o.Gap)
+					checks[1] = o.Rect
+					n = 2
+				}
+				for ci := 0; ci < n && !fixed; ci++ {
+					pt, ok := SegCrossRect(a, b, checks[ci])
+					if !ok || near(pt, b) {
 						continue // сегмент заканчивается на границе — не сквозь
 					}
 					e := entry{k, pt}
@@ -376,30 +413,12 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 						continue
 					}
 					seen[e] = true
-					next := detourAround(route, i-1, obstacles[k], out)
+					next := detourAround(route, i-1, o.Rect, out, opts.Prev, opts.Sticky)
 					if samePath(next, route) {
 						continue // обход выродился — не крутим вхолостую
 					}
 					route, fixed, detours = next, true, detours+1
-					break
 				}
-			}
-			// свои блоки: только без разрезания внутренности (без зоны)
-			for k := 0; k < len(self) && !fixed; k++ {
-				pt, ok := SegCrossRect(a, b, self[k])
-				if !ok || near(pt, b) {
-					continue
-				}
-				e := entry{len(obstacles) + k, pt}
-				if seen[e] {
-					continue
-				}
-				seen[e] = true
-				next := detourAround(route, i-1, self[k], out)
-				if samePath(next, route) {
-					continue
-				}
-				route, fixed, detours = next, true, detours+1
 			}
 		}
 		if !fixed {
@@ -409,12 +428,24 @@ func RouteAvoid(p1 Vec, s1 Side, p2 Vec, s2 Side, out float32, obstacles, self [
 	return Clean(route)
 }
 
+// expandRect — прямоугольник r, расширенный на d со всех сторон.
+func expandRect(r Rect, d float32) Rect {
+	return Rect{
+		Min: Vec{X: r.Min.X - d, Y: r.Min.Y - d},
+		Max: Vec{X: r.Max.X + d, Y: r.Max.Y + d},
+	}
+}
+
 // detourAround заменяет сегмент route[segIdx]→route[segIdx+1] на обход
 // вокруг препятствия obs. Строит все разумные варианты (см.
 // detourCandidates) и выбирает лучший: без крюков-разворотов, затем
 // короче. Одно фиксированное правило обхода не годится: возврат на исходную
 // линию у точки b в части случаев продолжения маршрута давал крюк.
-func detourAround(route []Vec, segIdx int, obs Rect, out float32) []Vec {
+//
+// prev/sticky включают гистерезис: если другой вариант почти так же хорош
+// (не длиннее больше чем на sticky), выбирается тот, что ближе к прошлому
+// маршруту — иначе при микросдвиге блока сторона обхода скачет.
+func detourAround(route []Vec, segIdx int, obs Rect, out float32, prev []Vec, sticky float32) []Vec {
 	cands := detourCandidates(route, segIdx, obs, out)
 	if len(cands) == 0 {
 		return route
@@ -426,7 +457,41 @@ func detourAround(route []Vec, segIdx int, obs Rect, out float32) []Vec {
 			best, bestH, bestL = c, h, l
 		}
 	}
+	if sticky <= 0 || len(prev) == 0 {
+		return best
+	}
+	bestD := routeDist(best, prev)
+	for _, c := range cands {
+		h, l := Hairpins(c), pathLen(c)
+		if h != bestH || l > bestL+sticky {
+			continue
+		}
+		if d := routeDist(c, prev); d < bestD-eps {
+			best, bestD = c, d
+		}
+	}
 	return best
+}
+
+// routeDist — насколько маршрут a далёк от b: сумма манхэттенских расстояний
+// от вершин a до ближайшей вершины b. Вершины обхода по разные стороны
+// блока разнесены на его высоту/ширину, поэтому «своя» сторона даёт заметно
+// меньшее значение, а совпадающие участки — нулевой вклад.
+func routeDist(a, b []Vec) float32 {
+	var sum float32
+	for _, p := range a {
+		best := float32(math.Inf(1))
+		for _, q := range b {
+			d := absf(p.X-q.X) + absf(p.Y-q.Y)
+			if d < best {
+				best = d
+			}
+		}
+		if !math.IsInf(float64(best), 1) {
+			sum += best
+		}
+	}
+	return sum
 }
 
 // detourCandidates — варианты обхода сегмента route[segIdx] вокруг obs.
