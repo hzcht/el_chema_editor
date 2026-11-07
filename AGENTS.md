@@ -2,94 +2,86 @@
 
 ## What this repo is
 
-Greenfield project: a desktop circuit editor + AC/DC simulator in Go (spiritual
-rewrite of the author's old Pascal/Delphi school project). **Stage 1 (pure graphical editor) is implemented** in `cmd/shbuilder` + `internal/{core,geom}`; no physics/simulation yet.
+Desktop circuit editor + AC/DC simulator in Go (rewrite of the author's old
+Pascal/Delphi school project). **Stage 1 (pure graphical editor)** is implemented
+in `cmd/shbuilder` on top of `internal/{core,geom}`; no physics/simulation yet.
 
 ## Key files
 
-- `ideas.md` — the brainstorm/spec. Read it before designing anything: it contains
-  the task statement (§1), UI framework candidates and the comparison table (§2, §11),
-  proposed architecture (§3), topology/simulation approach (§4–5), routing rules
-  digest (§4.6), roadmap (§8), risks (§9), and **open questions (§10) that are still
-  unresolved**.
-- `problems.md` — journal of problems from play-test runs. One problem = one entry
-  with **Проблема / Что найдено / Что сделано / Что предлагается**. Append new
-  entries at the end of the numbered list, set the status, don't rewrite history.
+- `ideas.md` — the spec: task (§1), architecture (§3), **routing rules digest
+  (§4.6)**, roadmap/status (§8, §13.3), open questions (§10). Read before designing.
+- `problems.md` — play-test journal. One problem = **Проблема / Что найдено /
+  Что сделано / Что предлагается**, status `открыта` → `исправлена, ждёт
+  проверки` → `закрыта`. Append, don't rewrite history.
+- `DECISIONS.md` — ADRs: Gio (0001), two stages (0003), snapshots (0004),
+  JSON v1 (0005), mm/grid (0006), routing (0007).
 
 ## Ground rules
 
-- **Two-stage plan (§1 of `ideas.md`, decided):** stage 1 is a pure graphical
-  editor — blocks, connectors, live connector redraw, crossing/junction handling,
-  ordering (align/distribute), undo/redo, save/load. **No physics, no simulation,
-  no netlist at stage 1.** Physical binding and math models come at stage 2+.
-- Do not assume a UI framework or project layout has been fully chosen. Current state
-  (§10 of `ideas.md`, DECISIONS.md): **Fyne rejected** on this machine (no cgo toolchain);
-  final call between **Gio and Wails** pending the user's play-test of `spike/gio` and
-  `spike/wails`. Do not commit the main module to a GUI framework before that.
-- Planned layering (§3 of `ideas.md`): `model`/`topology`/`simulate` must stay pure Go
-  with zero GUI dependencies so they can be unit-tested and reused in a CLI.
-  The `simulate` package is stage-2+; do not scaffold it during stage 1.
-- Simulation MVP is **linear-only** (R/L/C + sources, MNA solver); nonlinear elements
-  (diodes, Newton–Raphson) are explicitly out of scope until a later phase.
+- **Stage 1 only:** blocks, connectors, live redraw, crossings/junctions,
+  align/distribute, undo/redo, save/load. **No physics, no netlist**; do not
+  scaffold `simulate`.
+- **Gio v0.10.3 is the chosen UI** (ADR-0001). `CGO_ENABLED=0`, no C compiler.
+  Fyne is rejected (needs cgo+MinGW); the Wails spike is a fallback only.
+- `model`/`topology`/`simulate` must stay pure Go with zero GUI deps (CLI reuse,
+  unit tests). Simulation MVP is **linear-only** (R/L/C + sources, MNA);
+  nonlinear (diodes/Newton) is out of scope.
+- Main module stays GUI-free in `internal/*`; `spike/*` are separate modules.
 
 ## Commands
 
-Toolchain: Go 1.27, git; **CGO_ENABLED=0 and no C compiler** on this machine.
-
 ```powershell
-# Main module (GUI app lives here now): verify right after any change
-go build ./... ; go test ./...
+# Main module: verify right after any change
+go build ./... ; go test ./... ; go vet ./...
 
-# Run the editor (stage 1): optional arg = path to JSON file (default schematic.json)
-go build -o shbuilder.exe ./cmd/shbuilder ; .\shbuilder.exe           # demo scene
-.\shbuilder.exe path\to\scheme.json                                   # open a file
+# Run the editor (optional arg = JSON file, default schematic.json)
+go build -o shbuilder.exe ./cmd/shbuilder ; .\shbuilder.exe
+.\shbuilder.exe path\to\scheme.json
 
 # Spike Gio — builds WITHOUT cgo
 cd spike/gio   ; go build -o spike-gio.exe .   ; .\spike-gio.exe
 
-# Spike Wails — build tags are MANDATORY; without them it silently exits 0
+# Spike Wails — build tags MANDATORY; without them it exits 0 with no window
 cd spike/wails ; go build -tags desktop,production -o spike-wails.exe . ; .\spike-wails.exe
 ```
 
-Gotchas (cost debugging time once — do not rediscover):
-- **`go build ./...` DOES write `shbuilder.exe` to repo root** (main package); when a
-  fresh binary is needed for a smoke-run, build with explicit `-o shbuilder.exe ./cmd/shbuilder`.
-- **Editor hotkeys (stage 1)**: `1..6` add a block with N pins at cursor, `Del` deletes
-  the selection (or block under cursor), `G` cycles grid step 5/10/20 mm, drag-from-pin
-  creates a link (rubber exits along the pin normal, lane-bypass when pulled backwards),
-  wire crossings draw as hop arcs (later in *key order* hops over earlier, see
-  `compareLinks` — deterministic, not creation order), `Ctrl+Z/Y` undo/redo,
-  `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press /
-  Finish-on-release (idle clicks don't pollute history — `core.History`).
-- **Wire routing (stage 1)**: `geom.RouteEx` builds detour *candidates* and picks
-  "no hairpin → shorter"; contract is `geom.Hairpins(route)==0` (rules digest §4.6 in
-  `ideas.md`). Obstacles carry their own `Gap` (`geom.Obstacle`): blocks — `outset`
-  (5 mm), own blocks — 0 (only "don't cut"), foreign pins — `pinGap` (2 mm, point
-  rect). `RouteOpts.Prev`+`Sticky` add detour-side hysteresis. `geom.RouteAvoid`
-  is the blocks-only compatibility wrapper. `drawLinks` pipeline: route → sort by
-  `compareLinks` → `geom.OffsetLanes` (collinear overlaps separated by `laneGap`,
-  endpoints/pin junctions untouched) → hop arcs. Don't bring back the old single
-  rule "always return to the original line
-  at b" — that is exactly what produced the «крюк» (down then up at the same x).
-  Regression: `TestRouteAvoidNoHooks` (scans ~142k block/obstacle configs),
-  `TestDemoLinksNoHooks`, `TestRouteAvoidForeignPin`, `TestDetourSideSticky`,
-  `TestOffsetLanes*`.
-- **Gio keyboard focus (v0.10.3) is triple-deferred — drop any one and keys die silently**:
-  every frame needs (1) `event.Op(gtx.Ops, keyTag)` (gives the handler `visible`),
-  (2) `key.FocusFilter{Target: keyTag}` inside the `q.Event(...)` call (gives `focusable`),
-  (3) `key.FocusCmd{Tag: keyTag}`. Without (1)+(2), `keyQueue.Frame` clears focus at the
-  END of every frame → key events are dropped between frames and nothing reacts.
-  Also `key.Filter{}` needs `Optional:` listing every modifier (Shift/Ctrl/Alt/Command/Super),
-  otherwise any modified keystroke fails `keyFilterMatch`. Headless regression test:
-  `TestKeyDeliveryHeadless` (cmd/shbuilder/main_test.go).
+## Gotchas (do not rediscover)
+
+- **`go build ./...` writes `shbuilder.exe` to repo root** (main package). For a
+  fresh smoke-run build explicitly: `go build -o shbuilder.exe ./cmd/shbuilder`.
+- **Editor UI (stage 1):** `1..6` add a block with N pins; the left **palette**
+  (132 px, 6 rows with mini-previews) does the same on click — it inserts at the
+  center of the visible canvas and selects the block; hotkeys over the palette
+  clamp there too. `Del` deletes selection (or block under cursor), `G` cycles
+  grid 5/10/20 mm, drag-from-pin creates a link (rubber exits along the pin
+  normal, backward pulls bypass around the block end), `Ctrl+Z/Y` undo/redo,
+  `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press
+  / Finish-on-release (idle clicks don't pollute history — `core.History`).
+  Palette input is consumed before canvas logic; `fitToWindow`/HUD account for
+  `paletteW`.
+- **Wire routing:** `geom.RouteEx` builds detour *candidates*, picks
+  "no hairpin → shorter"; contract is `geom.Hairpins(route)==0` (§4.6). Obstacles
+  carry `Gap` (`geom.Obstacle`): blocks — `outset` 5 mm, own blocks — 0 (only
+  "don't cut"), foreign pins — `pinGap` 2 mm (point rect). `RouteOpts.Prev` +
+  `Sticky` (3 mm) hold the detour side. `geom.RouteAvoid` is the blocks-only
+  compatibility wrapper. `drawLinks`: route → sort by `compareLinks`
+  (deterministic, NOT creation order) → `geom.OffsetLanes` (collinear overlaps
+  `laneGap` 2 mm; endpoints/pin junctions untouched) → hop arcs (`arcR` 1.6 mm).
+  **Do not** bring back "always return to the original line at b" — that is
+  exactly the old «крюк» (down then up at the same x). Regressions:
+  `TestRouteAvoidNoHooks` (~142k configs), `TestDemoLinksNoHooks`,
+  `TestRouteAvoidForeignPin`, `TestDetourSideSticky`, `TestOffsetLanes*`,
+  `TestEightLinksLanes`.
+- **Gio keyboard focus is triple-deferred — drop any one and keys die silently:**
+  every frame needs (1) `event.Op(gtx.Ops, keyTag)` (handler `visible`),
+  (2) `key.FocusFilter{Target: keyTag}` inside `q.Event(...)` (`focusable`),
+  (3) `key.FocusCmd{Tag: keyTag}`. Without (1)+(2) `keyQueue.Frame` clears focus
+  at the END of every frame. `key.Filter{}` must list every modifier in
+  `Optional:` (Shift/Ctrl/Alt/Command/Super), else modified keys fail
+  `keyFilterMatch`. Headless regression: `TestKeyDeliveryHeadless`.
 - **World unit = 1 mm** (ADR-0006): zoom 100% = 4 px/mm, default block 30×20 mm,
-  all coordinates snap to the current grid step. JSON v1 stores plain unitless
-  floats — no migration needed; old files just show bigger-than-grid coords
-  (resnap by hand).
-- **Wails needs `-tags desktop,production`** (or `dev`) — plain `go build` yields exit 0
-  with no window and no error.
-- **Fyne needs cgo+MinGW** — impossible on this machine; spike code kept but not buildable.
-  Do not add Fyne (or any cgo GUI) as a dependency without resolving the toolchain.
-- Swap-dep note: `fyne.io/fyne` (v1 path) is stale; if ever used, import `fyne.io/fyne/v2`.
-- `spike/*` are separate Go modules (own go.mod) so the main module stays GUI-free;
-  `go build ./...` at repo root must never pull in GUI deps.
+  all coords snap to the current grid step. JSON v1 stores plain unitless
+  floats — old files just show bigger-than-grid coords (resnap by hand).
+- **Wails** needs `-tags desktop,production` (or `dev`); plain `go build` exits 0
+  silently. **Fyne** needs cgo+MinGW (impossible here) — do not add a cgo GUI
+  without resolving the toolchain. Stale v1 import: use `fyne.io/fyne/v2` if ever.
