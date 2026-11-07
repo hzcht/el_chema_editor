@@ -61,12 +61,19 @@ Gotchas (cost debugging time once — do not rediscover):
   `compareLinks` — deterministic, not creation order), `Ctrl+Z/Y` undo/redo,
   `Ctrl+C/V` clipboard, `Ctrl+S/O` save/load. Undo granularity: Capture-on-press /
   Finish-on-release (idle clicks don't pollute history — `core.History`).
-- **Wire routing (stage 1)**: `geom.RouteAvoid` builds detour *candidates* and picks
+- **Wire routing (stage 1)**: `geom.RouteEx` builds detour *candidates* and picks
   "no hairpin → shorter"; contract is `geom.Hairpins(route)==0` (rules digest §4.6 in
-  `ideas.md`). Don't bring back the old single rule "always return to the original line
+  `ideas.md`). Obstacles carry their own `Gap` (`geom.Obstacle`): blocks — `outset`
+  (5 mm), own blocks — 0 (only "don't cut"), foreign pins — `pinGap` (2 mm, point
+  rect). `RouteOpts.Prev`+`Sticky` add detour-side hysteresis. `geom.RouteAvoid`
+  is the blocks-only compatibility wrapper. `drawLinks` pipeline: route → sort by
+  `compareLinks` → `geom.OffsetLanes` (collinear overlaps separated by `laneGap`,
+  endpoints/pin junctions untouched) → hop arcs. Don't bring back the old single
+  rule "always return to the original line
   at b" — that is exactly what produced the «крюк» (down then up at the same x).
-  Regression: `TestRouteAvoidNoHooks` (scans ~142k block/obstacle configs) and
-  `TestDemoLinksNoHooks`.
+  Regression: `TestRouteAvoidNoHooks` (scans ~142k block/obstacle configs),
+  `TestDemoLinksNoHooks`, `TestRouteAvoidForeignPin`, `TestDetourSideSticky`,
+  `TestOffsetLanes*`.
 - **Gio keyboard focus (v0.10.3) is triple-deferred — drop any one and keys die silently**:
   every frame needs (1) `event.Op(gtx.Ops, keyTag)` (gives the handler `visible`),
   (2) `key.FocusFilter{Target: keyTag}` inside the `q.Event(...)` call (gives `focusable`),
