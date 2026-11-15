@@ -5,12 +5,11 @@ package core
 // Правило §1: «Перекрытия объектов ведут к перерасположению их рядом».
 import "shbuilder/internal/geom"
 
-// PushOverlaps итеративно устраняет пересечения блоков документа:
-// двигаются только НЕ защищённые (protected) блоки.
-// Возвращает true, если пересечений не осталось.
-// Инвариант редактора: после любой мутации (drop/вставка/paste/align/load)
-// наложений быть не должно; если проходов не хватило, оставшиеся блоки
-// принудительно ставятся в ближайшую свободную клетку сетки.
+// PushOverlaps итеративно устраняет пересечения блоков документа: двигаются
+// только НЕ защищённые (protected) блоки. true — наложений не осталось.
+// Инвариант: после любой мутации (drop/вставка/paste/align/load) наложений быть
+// не должно; если проходов не хватило, подвижный блок ставится в свободную
+// клетку сетки. Разбор — docs/ALGORITHMS.md §4.1.
 func PushOverlaps(d *Document, protected map[string]bool, grid float32, passes int) bool {
 	if len(d.Blocks) < 2 {
 		return true
@@ -71,9 +70,9 @@ func HasOverlaps(d *Document) bool {
 	return false
 }
 
-// freeSpot — ближайшая к текущей позиции m точка сетки, прямоугольник из
-// которой не пересекает ни один другой блок. Кольца растут детерминированно,
-// внутри кольца выбирается минимальное смещение (ничьи — по порядку обхода).
+// freeSpot — ближайшая к текущей позиции m точка сетки, прямоугольник из которой
+// не пересекает ни один другой блок. Кольца растут детерминированно.
+// См. docs/ALGORITHMS.md §4.3.
 func freeSpot(d *Document, m *Block, grid float32) (float32, float32, bool) {
 	const maxRing = 512 // 512 клеток с запасом покрывают любую сцену этапа 1
 	bx, by := geom.Snap(m.X, grid), geom.Snap(m.Y, grid)
@@ -135,9 +134,8 @@ func moverPair(a, b *Block, protected map[string]bool) (mover, other *Block, ok 
 	return b, a, true
 }
 
-// push сдвигает mover минимальным смещением на сторону (по оси наименьшего
-// перекрытия), вставляя блок РЯДОМ с тем краем other, с которого он пришёл;
-// позиция snap'ится на сетку «наружу».
+// push сдвигает mover по оси наименьшего перекрытия и ставит его РЯДОМ с other,
+// снапя позицию наружу. См. docs/ALGORITHMS.md §4.2.
 func push(mover, other *Block, grid float32) {
 	mr, or := mover.Rect(), other.Rect()
 	wx := min(mr.Max.X, or.Max.X) - max(mr.Min.X, or.Min.X) // перекрытие по x

@@ -60,6 +60,7 @@ type Link struct {
 type Document struct {
 	Blocks []*Block
 	Links  []Link
+	Taps   []TapLink // T-соединения: провод от пина в точку на чужом линке
 	seq    int
 }
 
@@ -110,6 +111,29 @@ func (d *Document) AddLink(from, to Endpoint) bool {
 		}
 	}
 	d.Links = append(d.Links, Link{from, to})
+	return true
+}
+
+// AddTap добавляет T-соединение: провод от пина from в точку tap на чужом
+// линке. false — пин битый, хозяина нет, доля вне 0..1 или соединение уже есть.
+func (d *Document) AddTap(from Endpoint, tap Tap) bool {
+	if !d.EndpointValid(from) || !tap.FractionValid() {
+		return false
+	}
+	host, ok := d.LinkByKey(tap.Host)
+	if !ok {
+		return false
+	}
+	// хозяином не может быть линк из того же пина: это нулевая дуга
+	if host.From == from || host.To == from {
+		return false
+	}
+	for _, t := range d.Taps {
+		if t.From == from && t.Tap == tap {
+			return false
+		}
+	}
+	d.Taps = append(d.Taps, TapLink{From: from, Tap: tap})
 	return true
 }
 

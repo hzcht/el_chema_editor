@@ -9,6 +9,13 @@
 coverage.*
 vendor/
 
+# Local scratch / agent tooling
+.probe*/
+.freebuff/
+.opencode/
+backup/
+opencode.json
+
 # Editors / OS
 .vscode/
 .idea/

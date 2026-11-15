@@ -87,6 +87,7 @@ type editor struct {
 	dragOff    geom.Vec
 	dragLast   geom.Vec        // world-точка пред. кадра драга (для delta группы)
 	sel        map[string]bool // выделение по ID блоков
+	selLinkKey string          // ключ выделенного коннектора «from->to» (пусто — не выделен)
 	boxA, boxB geom.Vec        // рамка выделения (мировые точки)
 
 	// pan
@@ -240,6 +241,11 @@ func handleInput(q input.Source, ed *editor) {
 					ed.drag = b
 					ed.dragOff = world.Sub(geom.Vec{X: b.X, Y: b.Y})
 					ed.dragLast = world
+				} else if li, ok := ed.hitLink(world); ok {
+					// клик по коннектору — выделить его, снять выделение блоков
+					ed.sel = nil
+					ed.selLinkKey = linkKey(ed.doc.Links[li])
+					ed.msg = fmt.Sprintf("коннектор %s выделен", ed.selLinkKey)
 				} else {
 					ed.mode = modeBoxSelect
 					ed.boxA, ed.boxB = world, world
@@ -382,6 +388,7 @@ func (ed *editor) boxSelectFinish(world geom.Vec, mods key.Modifiers) {
 	degenerate := (x1-x0) < 0.5 && (y1-y0) < 0.5 // мм: обычный клик без рамки
 	if degenerate {
 		ed.sel = nil
+		ed.selLinkKey = ""
 		return
 	}
 	box := geom.NewRect(x0, y0, x1-x0, y1-y0)
@@ -402,7 +409,31 @@ func (ed *editor) boxSelectFinish(world geom.Vec, mods key.Modifiers) {
 }
 
 // clearSelection — общая точка сброса (undo/redo/load сбивают ссылки).
-func (ed *editor) clearSelection() { ed.sel = nil }
+func (ed *editor) clearSelection() { ed.sel = nil; ed.selLinkKey = "" }
+
+// hitLink ищет коннектор под точкой world (мировые координаты).
+// Порог попадания — 2.5 мм (ikonка курсора вписывается в этот круг).
+func (ed *editor) hitLink(world geom.Vec) (int, bool) {
+	const hit = 2.5 // мм
+	for i, l := range ed.doc.Links {
+		p1, s1, ok1 := ed.doc.PinPos(l.From)
+		p2, s2, ok2 := ed.doc.PinPos(l.To)
+		if !ok1 || !ok2 {
+			continue
+		}
+		path := geom.RouteEx(p1, s1, p2, s2, outset, geom.RouteOpts{
+			Obstacles: linkObstacles(ed.doc, l.From, l.To),
+		})
+		for k := 1; k < len(path); k++ {
+			a, b := path[k-1], path[k]
+			d, _ := geom.SegPointDist(a, b, world)
+			if d <= hit {
+				return i, true
+			}
+		}
+	}
+	return -1, false
+}
 
 // --- Клавиатура -------------------------------------------------------------
 
@@ -515,7 +546,11 @@ func processKey(k key.Event, ed *editor) {
 		addPinBlock(ed, int(k.Name[0]-'0'))
 	case !mod && ed.mode == modeFree &&
 		(k.Name == key.NameDeleteForward || k.Name == key.NameDeleteBackward):
-		deleteAtCursor(ed)
+		if ed.selLinkKey != "" {
+			ed.deleteLink(ed.selLinkKey)
+		} else {
+			deleteAtCursor(ed)
+		}
 	case !mod && ed.mode == modeFree && (k.Name == "G" || k.Name == "g"):
 		// цикл шага сетки: 5 → 10 → 20 → 5 (мм), вызывается ДО arrangeKey
 		ed.gridIdx = (ed.gridIdx + 1) % len(gridChoices)
@@ -692,6 +727,31 @@ func deleteAtCursor(ed *editor) {
 	}
 	ed.sel = nil
 	ed.msg = fmt.Sprintf("удалено блоков: %d", len(ids))
+}
+
+// deleteLink удаляет коннектор по ключу «from->to» и все T-соединения,
+// ссылающиеся на него как на хоста. undo/redo через Capture/Finish.
+func (ed *editor) deleteLink(key string) {
+	ed.history.Capture(ed.doc)
+	for i, l := range ed.doc.Links {
+		if linkKey(l) == key {
+			ed.doc.Links = append(ed.doc.Links[:i], ed.doc.Links[i+1:]...)
+			break
+		}
+	}
+	// T-соединения, чьим хозяином был удалённый линк, больше не имеют смысла.
+	taps := ed.doc.Taps[:0]
+	for _, t := range ed.doc.Taps {
+		if t.Tap.Host != key {
+			taps = append(taps, t)
+		}
+	}
+	ed.doc.Taps = taps
+	if ed.history.Finish(ed.doc) {
+		ed.dirty = true
+	}
+	ed.selLinkKey = ""
+	ed.msg = "коннектор удалён"
 }
 
 // --- Файлы ------------------------------------------------------------------
@@ -1001,10 +1061,9 @@ func drawGrid(gtx layout.Context, ed *editor) {
 	}
 }
 
-// compareLinks — стабильный ключ порядка отрисовки линков (П10): сначала
-// блок/пин начала, затем конца. Порядок не зависит от того, в какой
-// последовательности линки создавались, поэтому «кто прыгает мостиком»
-// не меняется между сессиями и запусками.
+// compareLinks — стабильный ключ порядка отрисовки линков (П10): от порядка
+// создания не зависит, поэтому мостики не «перепрыгивают» между сессиями.
+// См. docs/ALGORITHMS.md §9.1.
 func compareLinks(a, b core.Link) int {
 	switch {
 	case a.From.BlockID < b.From.BlockID:
@@ -1027,9 +1086,8 @@ func compareLinks(a, b core.Link) int {
 	return 0
 }
 
-// drawLinks рисует линки ортогональными маршрутами; пересечения разных
-// проводников на одной плоскости — «арка»: поздний линк перепрыгивает
-// ранний (мостик, §13.3), ранние рисуются сплошными.
+// drawLinks рисует линки ортогональными маршрутами; пересечение с более ранним
+// проводником — «мостик» (арка). Разбор — docs/ALGORITHMS.md §9.1–9.2.
 func drawLinks(gtx layout.Context, ed *editor) {
 	type seg struct{ a, b geom.Vec }
 	type routed struct {
@@ -1109,15 +1167,19 @@ func drawLinks(gtx layout.Context, ed *editor) {
 			a := ed.cam.WorldToScreen(sg.a)
 			b := ed.cam.WorldToScreen(sg.b)
 			hops := hopsPerSeg[u]
+			col, width := colLink, float32(2)
+			if linkKey(items[pos].link) == ed.selLinkKey {
+				col, width = colSel, float32(3) // выделенный коннектор — оранжевый, толще
+			}
 			if len(hops) == 0 {
-				drawSeg(gtx.Ops, a, b, 2, colLink)
+				drawSeg(gtx.Ops, a, b, width, col)
 				continue
 			}
 			dx, dy := b.X-a.X, b.Y-a.Y
 			length := float32(math.Sqrt(float64(dx*dx + dy*dy)))
 			rpx := arcR * ed.cam.Zoom // радиус арки, пикселей
 			if length < 1 || rpx*2 >= length {
-				drawSeg(gtx.Ops, a, b, 2, colLink) // не протыкается — рисуем целиком
+				drawSeg(gtx.Ops, a, b, width, col) // не протыкается — рисуем целиком
 				continue
 			}
 			slices.Sort(hops)
@@ -1141,7 +1203,7 @@ func drawLinks(gtx layout.Context, ed *editor) {
 			if pass < length-0.5 {
 				p.LineTo(f32.Point{X: b.X, Y: b.Y})
 			}
-			stroke(gtx.Ops, p.End(), 2, colLink)
+			stroke(gtx.Ops, p.End(), width, col)
 		}
 	}
 }
@@ -1183,11 +1245,9 @@ func sideOf(d *core.Document, ep core.Endpoint) geom.Side {
 // linkKey — стабильный ключ линка для памяти маршрутов (гистерезис).
 func linkKey(l core.Link) string { return l.From.String() + "->" + l.To.String() }
 
-// linkObstacles — препятствия маршрута линка. Чужие блоки обходятся с зоной
-// запрета «блок + outset», собственные блоки линка — только без разрезания
-// внутренности (пин лежит на кромке, зона вокруг него ломала бы подход).
-// Чужие пины — точки с зазором pinGap: провод не проходит ровно через точку
-// подключения, иначе он выглядит подключённым, хотя это не так.
+// linkObstacles — препятствия маршрута линка: чужие блоки с зоной запрета
+// «блок + outset», свои — только без разрезания внутренности, чужие пины —
+// точки с зазором pinGap. См. docs/ALGORITHMS.md §9.3.
 func linkObstacles(d *core.Document, from, to core.Endpoint) []geom.Obstacle {
 	out := make([]geom.Obstacle, 0, len(d.Blocks)+8)
 	for _, b := range d.Blocks {
@@ -1214,8 +1274,9 @@ func linkObstacles(d *core.Document, from, to core.Endpoint) []geom.Obstacle {
 	return out
 }
 
-// laneRects — прямоугольники для проверки сдвига полос (geom.OffsetLanes):
-// блоки и зоны чужих пинов. Свои пины линка не мешают — путь из них выходит.
+// laneRects — препятствия для сдвига полос (geom.OffsetLanes): блоки и зоны
+// чужих пинов. Свои пины не мешают — путь из них выходит.
+// См. docs/ALGORITHMS.md §9.3.
 func laneRects(d *core.Document, from, to core.Endpoint) []geom.Rect {
 	out := make([]geom.Rect, 0, len(d.Blocks)+8)
 	for _, b := range d.Blocks {
@@ -1240,13 +1301,9 @@ func laneRects(d *core.Document, from, to core.Endpoint) []geom.Rect {
 	return out
 }
 
-// linkObs — препятствия для маршрута линка. Чужие блоки (obstacles) обходят
-// с зоной запрета «блок + зазор»; блоки собственных концов (self) — только
-// без разрезания внутренности: пин лежит на кромке блока, и зона вокруг
-// него сделала бы каждый подход к пину «нарушением» — обход зацикливался
-// петлёй («флажок» у блока B в демо). Штырь-заглушка у пина лежит на
-// кромке и не детектится, дальше маршрут идёт только вокруг. Раньше блоки
-// концов исключались вовсе, и линк A.0→B.0 резал собственный блок A.
+// linkObs — препятствия в виде «чужие блоки / блоки концов» для RouteAvoid.
+// Собственные блоки идут без зоны вокруг пина (иначе «флажок» у подхода).
+// См. docs/ALGORITHMS.md §9.3.
 func linkObs(d *core.Document, from, to core.Endpoint) (obstacles, self []geom.Rect) {
 	for _, b := range d.Blocks {
 		r := b.Rect()
@@ -1259,9 +1316,9 @@ func linkObs(d *core.Document, from, to core.Endpoint) (obstacles, self []geom.R
 	return obstacles, self
 }
 
-// rubberRoute — предпросмотр резинки от пина до курсора: выход вдоль нормали
-// пина; курсор «вперёд» (по нормали) — одно колено, «назад» (под блок) —
-// обход по каналу за торцом блока, чтобы провод не перерезал блок.
+// rubberRoute — предпросмотр резинки: выход вдоль нормали пина, «вперёд» — одно
+// колено, «назад» — канал за торцом блока, чтобы не перерезать блок.
+// См. docs/ALGORITHMS.md §9.4.
 func rubberRoute(d *core.Document, ep core.Endpoint, c geom.Vec, out float32) []geom.Vec {
 	p, s, ok := d.PinPos(ep)
 	if !ok {

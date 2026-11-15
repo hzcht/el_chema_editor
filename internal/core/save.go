@@ -1,9 +1,8 @@
 package core
 
-// Save/load: JSON schema v1 в конверте {schema, blocks, links} (ideas.md §7:
-// человекочитаемый, git-дружелюбный формат с версией схемы). Реализован как
-// MarshalJSON/UnmarshalJSON у Document — обычный json.Marshal/Unmarshal
-// работает без обёрток. Загрузка атомарна: невалидный файл не портит документ.
+// Save/load: JSON schema v1 в конверте {schema, blocks, links, taps} (ADR-0005).
+// Реализовано как MarshalJSON/UnmarshalJSON у Document. Загрузка атомарна:
+// невалидный файл не портит документ. Разбор — docs/ALGORITHMS.md §8.
 
 import (
 	"encoding/json"
@@ -19,6 +18,9 @@ type fileV1 struct {
 	Schema int      `json:"schema"`
 	Blocks []*Block `json:"blocks"`
 	Links  []Link   `json:"links"`
+	// Taps — T-соединения (введены 2026-11-08, идея 1.3). Необязательное
+	// поле: файлы без него валидны, схема остаётся v1 (расширение, не ломание).
+	Taps []TapLink `json:"taps,omitempty"`
 }
 
 // MarshalJSON — сериализация документа (schema v1).
@@ -27,6 +29,7 @@ func (d *Document) MarshalJSON() ([]byte, error) {
 		Schema: SchemaVersion,
 		Blocks: d.Blocks,
 		Links:  d.Links,
+		Taps:   d.Taps,
 	}, "", "  ")
 }
 
@@ -39,7 +42,7 @@ func (d *Document) UnmarshalJSON(data []byte) error {
 	if f.Schema != SchemaVersion {
 		return fmt.Errorf("schema v%d не поддерживается (ожидается v%d)", f.Schema, SchemaVersion)
 	}
-	nd := &Document{Blocks: f.Blocks, Links: f.Links}
+	nd := &Document{Blocks: f.Blocks, Links: f.Links, Taps: f.Taps}
 	if err := nd.Validate(); err != nil {
 		return err
 	}
@@ -73,6 +76,21 @@ func (d *Document) Validate() error {
 		}
 		if !d.EndpointValid(l.To) {
 			return fmt.Errorf("link %d: to %s не существует", i, l.To.String())
+		}
+	}
+	for i, t := range d.Taps {
+		if !d.EndpointValid(t.From) {
+			return fmt.Errorf("tap %d: from %s не существует", i, t.From.String())
+		}
+		if !t.Tap.FractionValid() {
+			return fmt.Errorf("tap %d: доля t=%v вне 0..1", i, t.Tap.T)
+		}
+		host, ok := d.LinkByKey(t.Tap.Host)
+		if !ok {
+			return fmt.Errorf("tap %d: линк-хозяин %q не существует", i, t.Tap.Host)
+		}
+		if host.From == t.From || host.To == t.From {
+			return fmt.Errorf("tap %d: хозяин %q идёт из того же пина", i, t.Tap.Host)
 		}
 	}
 	return nil
