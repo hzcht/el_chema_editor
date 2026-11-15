@@ -1,2 +1,8 @@
 # el_chema_editor
-Stage 1 circuit editor in Go: blocks, connectors, orthogonal routing, undo/redo, JSON save/load, Gio UI
+Stage -1 circuit editor in Go: blocks, connectors, orthogonal routing, undo/redo, JSON save/load, Gio UI
+Редактор электрических схем на Go (Stage -1): блоки, коннекторы, ортогональная трассировка, undo/redo, сохранение в JSON.
+Ремейк моего школьного проекта, для моделирования эл схем. Тогда это был turbo pascal 7+turbovision
+Позволял накидать эл схему пост\переменного тока, и исследовать переходные процессы в ней.
+Код с годами был утерян. 
+Сейчас это попытка с 0 написать на go.
+В настоящий момент, отлаживаю рендеринг схем оптимальным способом.
