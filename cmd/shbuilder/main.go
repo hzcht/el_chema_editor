@@ -556,6 +556,8 @@ func processKey(k key.Event, ed *editor) {
 		ed.gridIdx = (ed.gridIdx + 1) % len(gridChoices)
 		ed.grid = gridChoices[ed.gridIdx]
 		ed.msg = fmt.Sprintf("шаг сетки: %v мм", ed.grid)
+	case !mod && ed.mode == modeFree && (k.Name == "L" || k.Name == "l"):
+		layoutKey(ed)
 	case !mod && ed.mode == modeFree && len(k.Name) == 1:
 		arrangeKey(string(k.Name), shift, ed)
 	}
@@ -604,6 +606,45 @@ func arrangeKey(name string, shift bool, ed *editor) {
 		ed.dirty = true
 	}
 	ed.msg = human
+}
+
+// layoutKey — автолайаут (roadmap 1.7): слои слева направо, источники слева.
+// Выделено ≥ 2 блоков — раскладываем только их, иначе весь документ.
+// Один undo-шаг; маршруты пересчитываются с нуля (сброс памяти гистерезиса).
+func layoutKey(ed *editor) {
+	var ids []string
+	if len(ed.sel) >= 2 {
+		ids = selIDs(ed.sel)
+	}
+	ed.history.Capture(ed.doc)
+	n, layers := core.Layout(ed.doc, ids, ed.grid)
+	msg := ""
+	if n > 0 {
+		// Разложенные блоки защищены от расталкивания: свежая раскладка
+		// важнее, уводить с дороги нужно чужие блоки.
+		laid := make(map[string]bool, n)
+		if ids == nil {
+			for _, b := range ed.doc.Blocks {
+				laid[b.ID] = true
+			}
+		} else {
+			for _, id := range ids {
+				laid[id] = true
+			}
+		}
+		if !core.PushOverlaps(ed.doc, laid, ed.grid, 64) {
+			core.PushOverlaps(ed.doc, nil, ed.grid, 64)
+			msg = " (наложения не развелись)"
+		}
+		ed.lastRoutes = nil
+		msg = fmt.Sprintf("автолайаут: %d блоков, %d слоёв%s", n, layers, msg)
+	} else {
+		msg = "автолайаут: нечего раскладывать (нужно ≥ 2 блока)"
+	}
+	if ed.history.Finish(ed.doc) {
+		ed.dirty = true
+	}
+	ed.msg = msg
 }
 
 func undoMark(ed *editor) {
@@ -1458,7 +1499,7 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	h := float32(gtx.Constraints.Max.Y)
 	hint := "колесо: зум к курсору (5%)   0/=/-: зум 100% / + / –   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +
 		"палитра слева или 1..6: блок с N пинами   G: сетка 5/10/20   Del: удалить   Ctrl+C/V: буфер   " +
-		"рамка/Shift+клик: выделить   A/R/T/B H/V D: выровнять   Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
+		"рамка/Shift+клик: выделить   A/R/T/B H/V D: выровнять   L: автолайаут   Ctrl+Z/Y: undo/redo   Ctrl+S/O: файл"
 	drawHUDLine(gtx, ed.th, hint, h-18, colText)
 }
 
