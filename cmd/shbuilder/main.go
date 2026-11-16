@@ -100,6 +100,10 @@ type editor struct {
 	linkHover bool
 
 	cursor geom.Vec // текущая точка курсора (экран)
+
+	// тулбар: индекс нажатой кнопки и кнопки под курсором (-1 — никакой)
+	toolPress int
+	toolHover int
 }
 
 func newApp() *editor {
@@ -124,13 +128,15 @@ func newApp() *editor {
 	}
 
 	ed := &editor{
-		doc:     d,
-		cam:     geom.Camera{Zoom: pxPerMM},
-		grid:    10, // мм (см. gridChoices[1])
-		gridIdx: 1,  // 10 мм — умолчание
-		th:      material.NewTheme(),
-		file:    path,
-		msg:     msg,
+		doc:       d,
+		cam:       geom.Camera{Zoom: pxPerMM},
+		grid:      10, // мм (см. gridChoices[1])
+		gridIdx:   1,  // 10 мм — умолчание
+		th:        material.NewTheme(),
+		file:      path,
+		msg:       msg,
+		toolPress: -1,
+		toolHover: -1,
 	}
 	// Инвариант: блоки не накладываются. Старый/ручной файл с пересечениями
 	// разводим сразу, до снимка истории (undo не должен возвращать наложения).
@@ -160,7 +166,7 @@ func demoScene() *core.Document {
 var canvasTag = new(struct{})
 
 const allKinds = pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel |
-	pointer.Scroll | pointer.Enter | pointer.Leave
+	pointer.Move | pointer.Scroll | pointer.Enter | pointer.Leave
 
 var scrollRange = pointer.ScrollRange{Min: math.MinInt, Max: math.MaxInt}
 
@@ -177,6 +183,35 @@ func handleInput(q input.Source, ed *editor) {
 		scr := geom.Vec{X: e.Position.X, Y: e.Position.Y}
 		ed.cursor = scr
 		world := ed.cam.ScreenToWorld(scr)
+
+		// Тулбар сверху: полоса перехватывает клики до канвы (как палитра).
+		// Активный драг/линк/панораму не трогаем — иначе драг «залипнет».
+		if inToolbar(scr) {
+			if ed.mode == modeFree {
+				switch e.Kind {
+				case pointer.Press:
+					if e.Buttons.Contain(pointer.ButtonPrimary) {
+						ed.toolPress = toolbarHit(scr, ed.viewW)
+					}
+				case pointer.Release, pointer.Cancel:
+					if ed.toolPress >= 0 && toolbarHit(scr, ed.viewW) == ed.toolPress {
+						toolRun(ed, toolButtons[ed.toolPress].act)
+					}
+					ed.toolPress = -1
+				case pointer.Move, pointer.Enter:
+					ed.toolHover = toolbarHit(scr, ed.viewW)
+				}
+				continue
+			}
+			ed.toolHover = -1
+		} else {
+			if ed.toolPress >= 0 && (e.Kind == pointer.Release || e.Kind == pointer.Cancel) {
+				ed.toolPress = -1 // отпустили мимо кнопки — действие отменяется
+			}
+			if e.Kind == pointer.Move || e.Kind == pointer.Leave {
+				ed.toolHover = -1
+			}
+		}
 
 		// Палитра слева: клик по строке ставит блок в центр видимой канвы.
 		// Если идёт драг/линк/панорама, курсор может заходить на палитру —
@@ -466,6 +501,26 @@ func handleKeys(q input.Source, ed *editor) {
 	}
 }
 
+// zoomStep — шаг зума (множитель) для клавиш ± и кнопок тулбара.
+// Клавиатурная семантика: просто множитель Zoom, без зума к курсору.
+func zoomStep(ed *editor, factor float32) {
+	ed.cam.Zoom = geom.ClampZoom(ed.cam.Zoom * factor)
+	ed.msg = fmt.Sprintf("зум %d%%", int(ed.cam.Zoom/pxPerMM*100))
+}
+
+// zoomReset — зум ровно 100%.
+func zoomReset(ed *editor) {
+	ed.cam.Zoom = pxPerMM
+	ed.msg = "зум 100%"
+}
+
+// cycleGrid — цикл шага сетки: 5 → 10 → 20 → 5 (мм).
+func cycleGrid(ed *editor) {
+	ed.gridIdx = (ed.gridIdx + 1) % len(gridChoices)
+	ed.grid = gridChoices[ed.gridIdx]
+	ed.msg = fmt.Sprintf("шаг сетки: %v мм", ed.grid)
+}
+
 // processKey — хоткеи. Ctrl — key.ModShortcut (на Windows Ctrl, на mac Cmd).
 func processKey(k key.Event, ed *editor) {
 	ed.lastKey = string(k.Name) // отладка: фиксируем каждую нажатую клавишу
@@ -517,14 +572,11 @@ func processKey(k key.Event, ed *editor) {
 	case !mod && ed.mode == modeFree && k.Name == key.NameHome:
 		fitToWindow(ed) // вся схема в окно
 	case !mod && ed.mode == modeFree && k.Name == "0":
-		ed.cam.Zoom = pxPerMM // сброс зума к 100%
-		ed.msg = "зум 100%"
+		zoomReset(ed)
 	case !mod && ed.mode == modeFree && k.Name == "=":
-		ed.cam.Zoom = geom.ClampZoom(ed.cam.Zoom * 1.1) // зум +
-		ed.msg = fmt.Sprintf("зум %d%%", int(ed.cam.Zoom/pxPerMM*100))
+		zoomStep(ed, 1.1) // зум +
 	case !mod && ed.mode == modeFree && k.Name == "-":
-		ed.cam.Zoom = geom.ClampZoom(ed.cam.Zoom / 1.1) // зум –
-		ed.msg = fmt.Sprintf("зум %d%%", int(ed.cam.Zoom/pxPerMM*100))
+		zoomStep(ed, 1.0/1.1) // зум –
 	case !mod && ed.mode == modeFree &&
 		(k.Name == key.NameLeftArrow || k.Name == key.NameRightArrow ||
 			k.Name == key.NameUpArrow || k.Name == key.NameDownArrow):
@@ -552,10 +604,7 @@ func processKey(k key.Event, ed *editor) {
 			deleteAtCursor(ed)
 		}
 	case !mod && ed.mode == modeFree && (k.Name == "G" || k.Name == "g"):
-		// цикл шага сетки: 5 → 10 → 20 → 5 (мм), вызывается ДО arrangeKey
-		ed.gridIdx = (ed.gridIdx + 1) % len(gridChoices)
-		ed.grid = gridChoices[ed.gridIdx]
-		ed.msg = fmt.Sprintf("шаг сетки: %v мм", ed.grid)
+		cycleGrid(ed) // вызывается ДО arrangeKey
 	case !mod && ed.mode == modeFree && (k.Name == "L" || k.Name == "l"):
 		layoutKey(ed)
 	case !mod && ed.mode == modeFree && len(k.Name) == 1:
@@ -677,14 +726,14 @@ func addPinBlock(ed *editor, n int) {
 // иначе центр видимой части канвы (полоса палитры слева не считается).
 func (ed *editor) canvasInsertScreen() geom.Vec {
 	p := ed.cursor
-	if ed.viewW > paletteW && ed.viewH > 0 &&
-		p.X >= paletteW && p.X <= ed.viewW && p.Y >= 0 && p.Y <= ed.viewH {
+	if ed.viewW > paletteW && ed.viewH > toolbarH &&
+		p.X >= paletteW && p.X <= ed.viewW && p.Y >= toolbarH && p.Y <= ed.viewH {
 		return p
 	}
-	if ed.viewW <= paletteW || ed.viewH <= 0 {
+	if ed.viewW <= paletteW || ed.viewH <= toolbarH {
 		return p // окно ещё не измерено — вставляем под курсором
 	}
-	return geom.Vec{X: (paletteW + ed.viewW) / 2, Y: ed.viewH / 2}
+	return geom.Vec{X: (paletteW + ed.viewW) / 2, Y: toolbarH + (ed.viewH-toolbarH)/2}
 }
 
 // addPinBlockAt — вставка блока с n пинами в экранной точке scr (undo-шаг).
@@ -834,23 +883,225 @@ func loadDoc(ed *editor) {
 	ed.msg = fmt.Sprintf("загружен %s (%d блоков)%s", ed.file, len(nd.Blocks), note)
 }
 
+// --- Тулбар -----------------------------------------------------------------
+
+// Полоса кнопок базовых операций сверху окна. Полоса лежит поверх канвы,
+// клики по ней перехватываются до канвы (как у палитры), камера не
+// пересчитывается. Кнопки вызывают те же функции, что и горячие клавиши.
+const (
+	toolbarH   = float32(38) // высота полосы, px
+	toolBtnH   = float32(24) // высота кнопки, px
+	toolBtnGap = float32(6)  // зазор между кнопками, px
+	toolGrpGap = float32(12) // дополнительный зазор перед новой группой, px
+	toolPadX   = float32(10) // отступ полосы по краям, px
+	toolPadY   = float32(7)  // отступ кнопок сверху/снизу, px
+)
+
+// toolAction — действие кнопки.
+type toolAction int
+
+const (
+	toolUndo toolAction = iota
+	toolRedo
+	toolOpen
+	toolSave
+	toolZoomOut
+	toolZoom100
+	toolZoomIn
+	toolFit
+	toolGrid
+	toolLayout
+	toolDelete
+)
+
+// toolBtn — кнопка: действие, подпись, ширина (px) и признак «начало группы»
+// (перед такой кнопкой рисуется разделитель). Ширина задана вручную: мерить
+// текст шейпером ради центрирования подписи не стоит.
+type toolBtn struct {
+	act   toolAction
+	label string
+	w     float32
+	group bool
+}
+
+var toolButtons = []toolBtn{
+	{act: toolUndo, label: "отменить", w: 68},
+	{act: toolRedo, label: "вернуть", w: 62},
+	{act: toolOpen, label: "открыть", w: 64, group: true},
+	{act: toolSave, label: "сохранить", w: 76},
+	{act: toolZoomOut, label: "–", w: 28, group: true},
+	{act: toolZoom100, label: "100%", w: 46},
+	{act: toolZoomIn, label: "+", w: 28},
+	{act: toolFit, label: "вся схема", w: 76},
+	{act: toolGrid, label: "сетка", w: 64, group: true},
+	{act: toolLayout, label: "раскладка", w: 80, group: true},
+	{act: toolDelete, label: "удалить", w: 66},
+}
+
+// toolText — подпись кнопки; у сетки в подписи текущий шаг.
+func toolText(b toolBtn, ed *editor) string {
+	if b.act == toolGrid {
+		return fmt.Sprintf("%s %v", b.label, ed.grid)
+	}
+	return b.label
+}
+
+// toolbarRects — прямоугольники кнопок для ширины окна viewW, в порядке
+// toolButtons. Переноса на вторую строку нет: в очень узком окне хвост
+// кнопок выходит за край и недоступен.
+func toolbarRects(viewW float32) []geom.Rect {
+	out := make([]geom.Rect, len(toolButtons))
+	x := toolPadX
+	for i, b := range toolButtons {
+		if b.group && i > 0 {
+			x += toolGrpGap
+		}
+		out[i] = geom.NewRect(x, toolPadY, b.w, toolBtnH)
+		x += b.w + toolBtnGap
+	}
+	return out
+}
+
+// inToolbar — точка лежит в полосе тулбара.
+func inToolbar(scr geom.Vec) bool { return scr.Y >= 0 && scr.Y < toolbarH }
+
+// toolbarHit — индекс кнопки под точкой экрана (-1 — мимо или кнопка за краем).
+func toolbarHit(scr geom.Vec, viewW float32) int {
+	if !inToolbar(scr) {
+		return -1
+	}
+	for i, r := range toolbarRects(viewW) {
+		if r.Max.X > viewW {
+			break
+		}
+		if r.Contains(scr) {
+			return i
+		}
+	}
+	return -1
+}
+
+// toolEnabled — доступна ли кнопка; недоступные рисуются серыми.
+func toolEnabled(ed *editor, act toolAction) bool {
+	if ed.mode != modeFree {
+		return false
+	}
+	undoN, redoN := ed.history.Depth()
+	switch act {
+	case toolUndo:
+		return undoN > 0
+	case toolRedo:
+		return redoN > 0
+	case toolLayout:
+		return len(ed.doc.Blocks) >= 2
+	}
+	return true
+}
+
+// toolRun выполняет действие кнопки теми же функциями, что и хоткеи.
+func toolRun(ed *editor, act toolAction) {
+	if ed.mode != modeFree {
+		return
+	}
+	switch act {
+	case toolUndo:
+		undoMark(ed)
+	case toolRedo:
+		redoMark(ed)
+	case toolOpen:
+		loadDoc(ed)
+	case toolSave:
+		saveDoc(ed)
+	case toolZoomOut:
+		zoomStep(ed, 1.0/1.1)
+	case toolZoom100:
+		zoomReset(ed)
+	case toolZoomIn:
+		zoomStep(ed, 1.1)
+	case toolFit:
+		fitToWindow(ed)
+	case toolGrid:
+		cycleGrid(ed)
+	case toolLayout:
+		layoutKey(ed)
+	case toolDelete:
+		if ed.selLinkKey != "" {
+			ed.deleteLink(ed.selLinkKey)
+		} else {
+			deleteAtCursor(ed)
+		}
+	}
+}
+
+// labelW — оценка ширины подписи, px (нужна только для центрирования текста).
+func labelW(txt string, sp float32) float32 {
+	return float32(len([]rune(txt))) * sp * 0.6
+}
+
+// drawToolbar — полоса кнопок; рисуется последней, поверх канвы и оверлеев.
+func drawToolbar(gtx layout.Context, ed *editor) {
+	w := float32(gtx.Constraints.Max.X)
+	fillRect(gtx.Ops, image.Rect(0, 0, int(w), int(toolbarH)), colPalBG)
+	drawSeg(gtx.Ops, geom.Vec{X: 0, Y: toolbarH}, geom.Vec{X: w, Y: toolbarH}, 1.5, colPalBord)
+
+	rects := toolbarRects(w)
+	for i, b := range toolButtons {
+		r := rects[i]
+		if r.Max.X > w {
+			break // узкое окно: хвост кнопок не влез
+		}
+		enabled := toolEnabled(ed, b.act)
+		box := image.Rect(int(r.Min.X), int(r.Min.Y), int(r.Max.X), int(r.Max.Y))
+		switch {
+		case !enabled:
+			fillRect(gtx.Ops, box, colToolOff)
+		case ed.toolPress == i:
+			fillRect(gtx.Ops, box, colToolDown)
+		case ed.toolHover == i:
+			fillRect(gtx.Ops, box, colToolHov)
+		default:
+			fillRect(gtx.Ops, box, colToolBG)
+		}
+		stroke(gtx.Ops, clip.Rect{Min: box.Min, Max: box.Max}.Path(), 1, colPalBord)
+		if b.group && i > 0 {
+			x := float32(box.Min.X) - toolGrpGap/2
+			drawSeg(gtx.Ops, geom.Vec{X: x, Y: r.Min.Y + 3}, geom.Vec{X: x, Y: r.Max.Y - 3}, 1, colPalBord)
+		}
+		c := colText
+		if !enabled {
+			c = colTextDim
+		}
+		txt := toolText(b, ed)
+		dx := r.Min.X + (r.Size().X-labelW(txt, 11))/2
+		t := op.Offset(image.Pt(int(dx), int(r.Min.Y+5))).Push(gtx.Ops)
+		l := material.Label(ed.th, unit.Sp(11), txt)
+		l.Color = c
+		l.Layout(gtx)
+		t.Pop()
+	}
+}
+
 // --- Отрисовка -------------------------------------------------------------
 
 var (
-	colBG      = color.NRGBA{R: 0xf7, G: 0xf7, B: 0xf8, A: 0xff}
-	colGrid    = color.NRGBA{R: 0xd9, G: 0xdc, B: 0xdf, A: 0xff}
-	colBlock   = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0xff}
-	colBord    = color.NRGBA{R: 0x2b, G: 0x4d, B: 0x91, A: 0xff}
-	colLink    = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0xff}
-	colJct     = color.NRGBA{R: 0xe0, G: 0x6a, B: 0x2a, A: 0xff} // junction-пин
-	colSel     = color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0xff} // рамка выделения
-	colFree    = color.NRGBA{R: 0xaa, G: 0xaa, B: 0xb2, A: 0xff} // свободный пин
-	colRubber  = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0x80}
-	colText    = color.NRGBA{R: 0x55, G: 0x55, B: 0x60, A: 0xff}
-	colTextDim = color.NRGBA{R: 0x8a, G: 0x8a, B: 0x96, A: 0xff}
-	colPalBG   = color.NRGBA{R: 0xec, G: 0xee, B: 0xf2, A: 0xff} // фон палитры
-	colPalBord = color.NRGBA{R: 0xc2, G: 0xc7, B: 0xd0, A: 0xff} // кромка палитры
-	colPalHov  = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x22} // подсветка строки
+	colBG       = color.NRGBA{R: 0xf7, G: 0xf7, B: 0xf8, A: 0xff}
+	colGrid     = color.NRGBA{R: 0xd9, G: 0xdc, B: 0xdf, A: 0xff}
+	colBlock    = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0xff}
+	colBord     = color.NRGBA{R: 0x2b, G: 0x4d, B: 0x91, A: 0xff}
+	colLink     = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0xff}
+	colJct      = color.NRGBA{R: 0xe0, G: 0x6a, B: 0x2a, A: 0xff} // junction-пин
+	colSel      = color.NRGBA{R: 0xf2, G: 0x96, B: 0x2e, A: 0xff} // рамка выделения
+	colFree     = color.NRGBA{R: 0xaa, G: 0xaa, B: 0xb2, A: 0xff} // свободный пин
+	colRubber   = color.NRGBA{R: 0x3a, G: 0x5a, B: 0x9a, A: 0x80}
+	colText     = color.NRGBA{R: 0x55, G: 0x55, B: 0x60, A: 0xff}
+	colTextDim  = color.NRGBA{R: 0x8a, G: 0x8a, B: 0x96, A: 0xff}
+	colPalBG    = color.NRGBA{R: 0xec, G: 0xee, B: 0xf2, A: 0xff} // фон палитры
+	colPalBord  = color.NRGBA{R: 0xc2, G: 0xc7, B: 0xd0, A: 0xff} // кромка палитры
+	colPalHov   = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x22} // подсветка строки
+	colToolBG   = color.NRGBA{R: 0xfd, G: 0xfd, B: 0xfe, A: 0xff} // кнопка тулбара
+	colToolHov  = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x33} // курсор на кнопке
+	colToolDown = color.NRGBA{R: 0x42, G: 0x74, B: 0xe0, A: 0x66} // кнопка нажата
+	colToolOff  = color.NRGBA{R: 0xf0, G: 0xf1, B: 0xf4, A: 0xff} // кнопка недоступна
 )
 
 // Палитра блоков слева (roadmap 1.1): ширина полосы, геометрия строк.
@@ -863,8 +1114,9 @@ const (
 )
 
 // paletteRowRect — строка палитры i (0..5 = блок с 1..6 пинами), экран.
+// Полоса тулбара сверху отнимает toolbarH.
 func paletteRowRect(i int) geom.Rect {
-	return geom.NewRect(0, paletteTitle+float32(i)*paletteRowH, paletteW, paletteRowH)
+	return geom.NewRect(0, toolbarH+paletteTitle+float32(i)*paletteRowH, paletteW, paletteRowH)
 }
 
 // paletteHit — какая строка палитры накрыта точкой (n = 1..6).
@@ -906,6 +1158,7 @@ func drawFrame(gtx layout.Context, ed *editor) {
 	drawMiniMap(gtx, ed)
 	drawPalette(gtx, ed)
 	drawHUD(gtx, ed)
+	drawToolbar(gtx, ed) // полоса кнопок — поверх всего
 }
 
 // docBBox — габарит всех блоков с полями pad (мм); пустой документ — условный мир.
@@ -935,12 +1188,14 @@ func fitToWindow(ed *editor) {
 	w, h := maxf(r.Size().X, 1), maxf(r.Size().Y, 1)
 	const margin = 48.0 // px со всех сторон
 	availW := maxf(ed.viewW-paletteW, 1)
-	z := geom.ClampZoom(minf(maxf((availW-2*margin)/w, 0.0001), (ed.viewH-2*margin)/h))
+	availH := maxf(ed.viewH-toolbarH, 1)
+	z := geom.ClampZoom(minf(maxf((availW-2*margin)/w, 0.0001), (availH-2*margin)/h))
 	cx, cy := (r.Min.X+r.Max.X)/2, (r.Min.Y+r.Max.Y)/2
 	sx := paletteW + availW/2 // центр видимой канвы на экране
+	sy := toolbarH + availH/2 // ниже полосы тулбара
 	ed.cam = geom.Camera{
 		Zoom: z,
-		Pan:  geom.Vec{X: sx - cx*z, Y: ed.viewH/2 - cy*z},
+		Pan:  geom.Vec{X: sx - cx*z, Y: sy - cy*z},
 	}
 	ed.msg = "вся схема в окне"
 }
@@ -1014,8 +1269,8 @@ func drawMiniMap(gtx layout.Context, ed *editor) {
 // мини-превью с пинами; клик по строке ставит блок в центр канвы.
 func drawPalette(gtx layout.Context, ed *editor) {
 	h := float32(gtx.Constraints.Max.Y)
-	fillRect(gtx.Ops, image.Rect(0, 0, int(paletteW), int(h)), colPalBG)
-	drawSeg(gtx.Ops, geom.Vec{X: paletteW, Y: 0}, geom.Vec{X: paletteW, Y: h}, 1.5, colPalBord)
+	fillRect(gtx.Ops, image.Rect(0, int(toolbarH), int(paletteW), int(h)), colPalBG)
+	drawSeg(gtx.Ops, geom.Vec{X: paletteW, Y: toolbarH}, geom.Vec{X: paletteW, Y: h}, 1.5, colPalBord)
 
 	label := func(txt string, x, y float32, sp unit.Sp, c color.NRGBA) {
 		t := op.Offset(image.Pt(int(x), int(y))).Push(gtx.Ops)
@@ -1024,8 +1279,8 @@ func drawPalette(gtx layout.Context, ed *editor) {
 		l.Layout(gtx)
 		t.Pop()
 	}
-	label("Палитра", 10, 8, 12, colText)
-	label("клик или 1..6", 10, 26, 9, colTextDim)
+	label("Палитра", 10, toolbarH+8, 12, colText)
+	label("клик или 1..6", 10, toolbarH+26, 9, colTextDim)
 
 	for i := 0; i < 6; i++ {
 		n := i + 1
@@ -1492,9 +1747,9 @@ func drawHUD(gtx layout.Context, ed *editor) {
 	if ed.mode == modeLink {
 		info += "   |   тянем от пина — отпусти на целевом пине"
 	}
-	drawHUDLine(gtx, ed.th, info, 0, colText)
+	drawHUDLine(gtx, ed.th, info, toolbarH+2, colText)
 	if ed.msg != "" {
-		drawHUDLine(gtx, ed.th, ed.msg, 16, colJct)
+		drawHUDLine(gtx, ed.th, ed.msg, toolbarH+18, colJct)
 	}
 	h := float32(gtx.Constraints.Max.Y)
 	hint := "колесо: зум к курсору (5%)   0/=/-: зум 100% / + / –   Home: вся схема   ПКМ/СКМ: панорама   ←↑↓→: листать   " +

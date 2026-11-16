@@ -492,6 +492,33 @@ JSON schema v1 в конверте `{schema, blocks, links, taps?}` (ADR-0005,
 - Сетка: 5 / 10 / 20 мм, цикл по `G` (умолчание 10 мм), `geom.Snap` —
   округление к ближайшему кратному.
 
+### 9.8 Тулбар (`toolbarRects`, `toolbarHit`, `toolRun`)
+
+- Полоса кнопок сверху (`toolbarH = 38 px`) — оверлей поверх канвы, как
+  палитра: клики перехватываются до канвы, камера не пересчитывается. Во время
+  драга/линка/панорамы события не перехватываются (иначе драг «залипнет»).
+- Кнопки — таблица `toolButtons` (`act`, `label`, `w`, `group`); `toolbarRects`
+  раскладывает их слева направо: `toolPadX`, `toolBtnGap` между кнопками,
+  `toolGrpGap` перед началом группы + разделитель. Переноса на вторую строку
+  нет: в узком окне хвост кнопок выходит за край и недоступен.
+- Набор: отменить, вернуть | открыть, сохранить | зум −, 100 %, зум +, вся
+  схема | сетка 5/10/20 | раскладка | удалить. Выравнивание, буфер и вставка
+  блоков остаются на клавишах и палитре.
+- Хит-тест `toolbarHit(scr, viewW)` — индекс кнопки или −1; нажатие
+  запоминается в `ed.toolPress`, срабатывает на release **внутри** той же
+  кнопки, hover — `ed.toolHover` (нужен `pointer.Move` в `allKinds`).
+- `toolEnabled` — серая кнопка: `mode != modeFree`, undo/redo по глубине
+  `History.Depth()`, раскладка при `< 2` блоках.
+- `toolRun` переиспользует те же функции, что и хоткеи
+  (`undoMark`/`redoMark`/`saveDoc`/`loadDoc`/`zoomStep`/`zoomReset`/
+  `fitToWindow`/`cycleGrid`/`layoutKey`/`deleteLink`/`deleteAtCursor`) —
+  поведение кнопок и клавиш совпадает по построению.
+- Оверлеи сдвинуты ниже полосы: палитра (`paletteRowRect`, `drawPalette`),
+  строки HUD (`toolbarH+2`, `toolbarH+18`), центр вставки
+  (`canvasInsertScreen`) и `fitToWindow` (свободная область
+  `viewH-toolbarH`). Подпись кнопки центрируется оценкой `labelW` (по числу
+  рун), без измерения шейпером.
+
 ---
 
 ## 10. Сводка инвариантов
@@ -531,3 +558,4 @@ JSON schema v1 в конверте `{schema, blocks, links, taps?}` (ADR-0005,
 | Мостики и порядок | `drawLinks`, `compareLinks` | `TestArcStrokeHeadless`, `TestLinkDrawOrderStable` |
 | Резинка | `rubberRoute` | `TestDemoProductionRoutes` |
 | Камера и сетка | `geom.Camera`, `Snap`, `fitToWindow` | `TestCameraRoundtrip`, `TestZoomAtAnchorsCursor`, `TestSnap`, `TestFitToWindow` |
+| Тулбар | `toolbarRects`, `toolbarHit`, `toolEnabled`, `toolRun`, `drawToolbar` | `TestToolbarRects`, `TestToolbarHit`, `TestToolEnabled`, `TestToolRun*` |

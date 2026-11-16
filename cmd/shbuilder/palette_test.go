@@ -63,7 +63,7 @@ func TestPaletteInsertCenter(t *testing.T) {
 		t.Fatalf("пинов %d, ожидали 3", b.Pins)
 	}
 	wantCX := (paletteW + ed.viewW) / 2
-	wantCY := ed.viewH / 2
+	wantCY := toolbarH + (ed.viewH-toolbarH)/2
 	c := ed.cam.ScreenToWorld(geom.Vec{X: wantCX, Y: wantCY})
 	wantX := geom.Snap(c.X-15, ed.grid)
 	wantY := geom.Snap(c.Y-10, ed.grid)
